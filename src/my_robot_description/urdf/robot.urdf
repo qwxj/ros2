@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<robot name="my_car">
+
+  <!-- base_footprint：车体在地面上的投影点，ROS 的标准"根坐标系" -->
+  <link name="base_footprint"/>
+
+  <!-- 用固定关节把 base_link 架到 base_footprint 上方 0.05 米 -->
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.05" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="2.0 2.0 2.0"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.2 0.4 0.8 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+</robot>
