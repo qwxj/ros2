@@ -17,3 +17,7 @@ frames_*.pdf
 .vscode-server/
 *.swp
 .DS_Store
+
+# Python 字节码缓存
+__pycache__/
+*.pyc
