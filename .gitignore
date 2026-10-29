@@ -1,0 +1,19 @@
+# colcon 构建产物（可再生成，不要进版本库）
+build/
+install/
+log/
+
+# rosbag / 录制数据（二进制、体积大）
+my_topic_bag/
+*.bag
+*.db3
+*.mcap
+
+# tf2 view_frames 生成的图（需要版本化时删掉这两行）
+frames_*.gv
+frames_*.pdf
+
+# 编辑器/系统垃圾
+.vscode-server/
+*.swp
+.DS_Store
