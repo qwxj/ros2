@@ -381,6 +381,17 @@ install(TARGETS topic_components
 )
 
 
+# 回调并行执行
+add_executable(
+    executor_callback_group_demo
+    src/executor_callback_group_demo.cpp
+)
+
+ament_target_dependencies(
+    executor_callback_group_demo
+    rclcpp
+)
+
 # ============================================================
 # 十、安装所有可执行程序
 # ============================================================
@@ -425,6 +436,9 @@ install(
 
     # launch节点管理
     status_node
+
+    # 并行执行回调
+    executor_callback_group_demo
 
   DESTINATION lib/${PROJECT_NAME}
 )
