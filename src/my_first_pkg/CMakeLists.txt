@@ -443,6 +443,16 @@ ament_target_dependencies(bigdata_benchmark
   my_robot_interfaces
 )
 
+# 消息对象池
+add_executable(bigdata_pool_benchmark
+  src/bigdata_pool_benchmark.cpp
+)
+
+ament_target_dependencies(bigdata_pool_benchmark
+  rclcpp
+  my_robot_interfaces
+)
+
 
 
 # ============================================================
@@ -507,6 +517,9 @@ install(
 
     # 大数据传输测试
     bigdata_benchmark
+
+    # 消息对象池
+    bigdata_pool_benchmark
 
   DESTINATION lib/${PROJECT_NAME}
 )
