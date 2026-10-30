@@ -422,6 +422,17 @@ ament_target_dependencies(task_isolation_demo
   std_msgs
 )
 
+# 独立工作线程做耗时操作
+add_executable(worker_queue_demo
+  src/worker_queue_demo.cpp
+)
+
+ament_target_dependencies(worker_queue_demo
+  rclcpp
+  std_msgs
+)
+
+
 # ============================================================
 # 十、安装所有可执行程序
 # ============================================================
@@ -477,7 +488,9 @@ install(
 
     # 任务隔离，多线程
     task_isolation_demo
-
+    
+    # 独立工作线程处理数据
+    worker_queue_demo
 
 
   DESTINATION lib/${PROJECT_NAME}
