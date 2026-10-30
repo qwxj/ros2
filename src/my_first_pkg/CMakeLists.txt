@@ -433,6 +433,18 @@ ament_target_dependencies(worker_queue_demo
 )
 
 
+# 测试同一进程内不同通信方式，大数据传输
+add_executable(bigdata_benchmark
+  src/bigdata_benchmark.cpp
+)
+
+ament_target_dependencies(bigdata_benchmark
+  rclcpp
+  my_robot_interfaces
+)
+
+
+
 # ============================================================
 # 十、安装所有可执行程序
 # ============================================================
@@ -492,6 +504,9 @@ install(
     # 独立工作线程处理数据
     worker_queue_demo
 
+
+    # 大数据传输测试
+    bigdata_benchmark
 
   DESTINATION lib/${PROJECT_NAME}
 )
