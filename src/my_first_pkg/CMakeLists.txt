@@ -412,6 +412,16 @@ ament_target_dependencies(latency_subscriber
   my_robot_interfaces
 )
 
+# 多线程、不同组隔离开不同任务
+add_executable(task_isolation_demo
+  src/task_isolation_demo.cpp
+)
+
+ament_target_dependencies(task_isolation_demo
+  rclcpp
+  std_msgs
+)
+
 # ============================================================
 # 十、安装所有可执行程序
 # ============================================================
@@ -464,6 +474,10 @@ install(
     # 统计消息传递延时
     latency_publisher
     latency_subscriber
+
+    # 任务隔离，多线程
+    task_isolation_demo
+
 
 
   DESTINATION lib/${PROJECT_NAME}
