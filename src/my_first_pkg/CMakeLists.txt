@@ -453,6 +453,16 @@ ament_target_dependencies(bigdata_pool_benchmark
   my_robot_interfaces
 )
 
+# 添加丢弃策略的消息对象池
+add_executable( bigdata_pool_benchmark_loss
+  src/bigdata_pool_benchmark_loss.cpp
+)
+
+ament_target_dependencies(bigdata_pool_benchmark_loss
+  rclcpp
+  my_robot_interfaces
+)
+
 
 
 # ============================================================
@@ -520,6 +530,7 @@ install(
 
     # 消息对象池
     bigdata_pool_benchmark
+    bigdata_pool_benchmark_loss # 丢弃策略
 
   DESTINATION lib/${PROJECT_NAME}
 )
