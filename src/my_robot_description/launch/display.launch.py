@@ -20,6 +20,12 @@ def generate_launch_description():
             parameters=[{'robot_description': robot_description}],
             output='screen',
         ),
+        # 给两个 continuous 关节发布 /joint_states，并弹出滑块窗口
+        Node(
+            package='joint_state_publisher_gui',
+            executable='joint_state_publisher_gui',
+            output='screen',
+        ),
         Node(
             package='rviz2',
             executable='rviz2',
