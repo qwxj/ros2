@@ -392,6 +392,26 @@ ament_target_dependencies(
     rclcpp
 )
 
+
+# 统计消息传递之间的延时
+add_executable(latency_publisher
+  src/latency_publisher.cpp
+)
+
+ament_target_dependencies(latency_publisher
+  rclcpp
+  my_robot_interfaces
+)
+
+add_executable(latency_subscriber
+  src/latency_subscriber.cpp
+)
+
+ament_target_dependencies(latency_subscriber
+  rclcpp
+  my_robot_interfaces
+)
+
 # ============================================================
 # 十、安装所有可执行程序
 # ============================================================
@@ -439,6 +459,12 @@ install(
 
     # 并行执行回调
     executor_callback_group_demo
+
+
+    # 统计消息传递延时
+    latency_publisher
+    latency_subscriber
+
 
   DESTINATION lib/${PROJECT_NAME}
 )
