@@ -1,0 +1,51 @@
+
+<?xml version="1.0" encoding="UTF-8"?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+
+    <!-- 默认 Publisher -->
+    <publisher profile_name="default publisher profile"
+               is_default_profile="true">
+        <historyMemoryPolicy>PREALLOCATED_WITH_REALLOC</historyMemoryPolicy>
+        <qos>
+            <data_sharing>
+                <kind>OFF</kind>
+            </data_sharing>
+        </qos>
+    </publisher>
+
+    <!-- 默认 Subscriber -->
+    <subscriber profile_name="default subscription profile"
+                is_default_profile="true">
+
+        <historyMemoryPolicy>PREALLOCATED_WITH_REALLOC</historyMemoryPolicy>
+
+        <qos>
+            <data_sharing>
+                <kind>OFF</kind>
+            </data_sharing>
+        </qos>
+    </subscriber>
+
+    <!-- /loaned_topic 专用 Publisher -->
+    <publisher profile_name="/loaned_topic">
+        <historyMemoryPolicy>PREALLOCATED_WITH_REALLOC</historyMemoryPolicy>
+        <qos>
+            <data_sharing>
+                <kind>AUTOMATIC</kind>
+            </data_sharing>
+        </qos>
+    </publisher>
+
+    <!-- /loaned_topic 专用 Subscriber -->
+    <subscriber profile_name="/loaned_topic">
+
+        <historyMemoryPolicy>PREALLOCATED_WITH_REALLOC</historyMemoryPolicy>
+
+        <qos>
+            <data_sharing>
+                <kind>AUTOMATIC</kind>
+            </data_sharing>
+        </qos>
+    </subscriber>
+
+</profiles>
