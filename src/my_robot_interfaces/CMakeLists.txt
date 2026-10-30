@@ -11,6 +11,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GetDeviceStatus.srv"
   "msg/DeviceStatus.msg"
   "msg/LatencyData.msg"
+  "msg/BigData.msg"
   DEPENDENCIES builtin_interfaces
 )
 
