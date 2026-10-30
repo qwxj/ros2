@@ -464,6 +464,16 @@ ament_target_dependencies(bigdata_pool_benchmark_loss
 )
 
 
+# 使用loaned message的demo
+add_executable(loaned_message_demo
+  src/loaned_message_demo.cpp
+)
+
+ament_target_dependencies(loaned_message_demo
+  rclcpp
+  my_robot_interfaces
+)
+
 
 # ============================================================
 # 十、安装所有可执行程序
@@ -531,6 +541,9 @@ install(
     # 消息对象池
     bigdata_pool_benchmark
     bigdata_pool_benchmark_loss # 丢弃策略
+
+    # loaned message demo
+    loaned_message_demo
 
   DESTINATION lib/${PROJECT_NAME}
 )
