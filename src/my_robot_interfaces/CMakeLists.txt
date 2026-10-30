@@ -13,6 +13,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LatencyData.msg"
   "msg/BigData.msg"
   "msg/LoanedData.msg"
+  "msg/BigLoanedData.msg"
   DEPENDENCIES builtin_interfaces
 )
 

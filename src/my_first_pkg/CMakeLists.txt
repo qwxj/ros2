@@ -474,6 +474,23 @@ ament_target_dependencies(loaned_message_demo
   my_robot_interfaces
 )
 
+# 普通消息发布与loaned message发布的对比demo
+add_executable(loaned_compare src/loaned_compare.cpp)
+
+ament_target_dependencies(loaned_compare
+  rclcpp
+  my_robot_interfaces
+)
+
+
+# 大数据比对
+add_executable(big_loaned_compare src/big_loaned_compare.cpp)
+
+ament_target_dependencies(big_loaned_compare
+  rclcpp
+  my_robot_interfaces
+)
+
 
 # ============================================================
 # 十、安装所有可执行程序
@@ -544,6 +561,12 @@ install(
 
     # loaned message demo
     loaned_message_demo
+
+    # 普通消息发布与loaned message发布的对比demo
+    loaned_compare
+    # 大数据比对
+    big_loaned_compare
+    
 
   DESTINATION lib/${PROJECT_NAME}
 )
