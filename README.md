@@ -223,6 +223,26 @@
 > `src/my_first_pkg/launch/multi_node.launch.py`（启动 `my_publisher`、`status_node`，加载 `params.yaml`）、
 > `src/my_robot_description/launch/display.launch.py`（启动 `robot_state_publisher` + RViz2）
 
+### 17. 数据录制与离线回放（rosbag2）
+
+- 用 `ros2 bag record` **显式列出话题**录制（不用 `-a`），产出两个数据集：
+  `bags/drive_01`（4 话题 / 37 s / 7436 条 / 3.7 MiB）与
+  `bags/with_cam`（`/camera/image_raw` + `/scan` / 19 s / 442 条 / 234 MiB）。
+- 实测各话题数据量差异极大：`/scan` 9.5 Hz、`/odom` 47 Hz、
+  **`/tf` 143 Hz（消息数比 `/scan` 大 15 倍）**、`/camera/image_raw` 14 Hz
+  （单帧 640×480×3 ≈ 0.9 MB，10 Hz 即 9 MB/s，20 秒约 180 MB）。
+  所以录制必须显式选话题 + 控制时长，盲目 `-a` 会让 bag 迅速膨胀。
+- 回放用 `ros2 bag play --clock 1000`，由**播放器自己产生 `/clock`**；
+  因此录制时**不需要录 `/clock`**（它 1000 Hz，录进去纯属浪费），
+  而 `use_sim_time` 的节点在没有 Gazebo 时也能正常工作。
+- 验证了**数据与算法解耦**：Ctrl+C 关掉 Gazebo 后回放 `bags/with_cam`，
+  `image_processor` 照常处理并发布 `/image_processed`，RViz 正常显示边缘图 ——
+  调算法不必再启动仿真、开车对准目标，且每次输入完全一致（可复现）。
+- 常用参数：`-r 0.5` 慢放、`-l` 循环、`--topics` 只放部分话题、
+  `-p` 启动即暂停、`--start-offset` 跳过开头、`--max-bag-duration` 限制录制时长。
+
+> **涉及目录**：`bags/`（录制数据，已在 `.gitignore` 中排除，不入库）
+
 ## 项目结构
 
 ```text
@@ -305,6 +325,7 @@ ros2/
 │       ├── CMakeLists.txt
 │       └── package.xml
 │
+├── bags/                             # rosbag2 录制数据（已 gitignore，不入库）
 ├── DEFAULT_FASTDDS_PROFILES.xml      # Fast DDS 自定义 profile（data_sharing 配置）
 ├── .gitignore
 └── README.md
@@ -545,6 +566,36 @@ ros2 launch my_robot_description display.launch.py
 > 提醒：`loaned_message_demo` / `loaned_compare` / `big_loaned_compare` 依赖 Fast DDS 的
 > `data_sharing` 配置，需要在 `~/ros2` 目录下运行才能自动读到 `DEFAULT_FASTDDS_PROFILES.xml`。
 
+### 7. 数据录制与离线回放
+
+```bash
+# ① 录制：显式列话题（不要 -a）
+cd ~/ros2
+ros2 bag record -o bags/drive_01 /scan /odom /tf /tf_static
+
+# 录制带相机：体积大，限制时长
+ros2 bag record -o bags/with_cam /camera/image_raw /scan --max-bag-duration 10
+
+# ② 查看 bag 内容（时长 / 消息数 / 各话题类型）
+ros2 bag info bags/drive_01
+
+# ③ 回放：--clock 让播放器自己产生仿真时钟
+ros2 bag play bags/drive_01 --clock 1000
+
+# 慢放 + 循环（调参时最常用）
+ros2 bag play bags/with_cam --clock 1000 -r 0.5 -l
+
+# 只回放部分话题
+ros2 bag play bags/drive_01 --clock 1000 --topics /scan /tf
+```
+
+> **验证解耦**：先 Ctrl+C 关掉 Gazebo，再执行回放 —— `/scan`、`/odom`、`/tf` 依然存在，
+> 因为数据来自 bag 文件而不是仿真。此时再运行 `image_processor`，整条处理链路照常工作。
+
+> **注意**：`-o` 后面跟的是**目录名**，不要自己加 `.db3` 后缀；
+> 录制结束务必用 **Ctrl+C 正常退出**，否则 `metadata.yaml` 写不完整，
+> 之后需要 `ros2 bag reindex` 修复。
+
 ## 实践与技术收获
 
 通过这些示例，对 ROS 2 的开发流程和底层机制进行了实践，主要包括：
@@ -568,6 +619,9 @@ ros2 launch my_robot_description display.launch.py
 - 掌握 `cv_bridge` 的双向转换（`toCvCopy` / `CvImage::toImageMsg`）、`rgb8` 与 `bgr8` 的差异，
   以及处理图像节点必须继承 `header` 的原因。
 - 掌握 ROS 2 参数的运行时更新（`add_on_set_parameters_callback` + 校验）与持久化（YAML + launch）。
+- 掌握 rosbag2 的录制与回放，理解各话题的数据量量级（`/tf` 高频、图像极大），
+  以及 `--clock` 对离线回放的必要性。
+- 建立"数据与算法解耦"的调试方式：一次录制、反复回放，保证算法输入的完全可复现。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -581,7 +635,7 @@ ros2 launch my_robot_description display.launch.py
 - [x] 相机图像处理：cv_bridge + OpenCV 边缘检测
 - [x] 参数持久化（YAML + launch 加载）
 - [ ] IMU 传感器仿真
-- [ ] rosbag2 录制与离线回放
+- [x] rosbag2 录制与离线回放
 - [ ] SLAM 建图（slam_toolbox）
 - [ ] Nav2 导航框架实践
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
@@ -594,6 +648,7 @@ ros2 launch my_robot_description display.launch.py
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31 上午** | 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件 |
 | **2026-10-31 下午** | 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载） |
+| **2026-10-31 傍晚** | rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/` |
 
 ## 说明
 
