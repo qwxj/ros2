@@ -172,13 +172,16 @@
 
 - `/cmd_vel` 是**设定值**而非一次性命令：差速驱动插件会把最后收到的速度一直保持下去，
   遥控端掉线时机器人会一直冲（Gazebo 的差速插件本身**没有任何超时机制**）。
-- 自写节点 `cmd_vel_watchdog`：把 `/cmd_vel_input` 转发到 `/cmd_vel`；
+- 自写节点 `cmd_vel_watchdog`：把 `/cmd_vel` 转发到 `/cmd_vel_safe`；
   若 `timeout_sec` 内没有新指令，就主动发布**全零**（注意不是"停止发布"——停止发不会刹车）。
 - 超时用 `std::chrono::steady_clock` 而不是 `this->now()`：Gazebo 一旦暂停，ROS 时间会冻住，
   用仿真时间会让看门狗**彻底失效且不报错**。
 - 超时阈值必须**大于**指令发布周期（`τ ≥ 2~3 × T`），否则每个周期都会误报，
   机器人表现为"走一下、停一下"。
 - `timeout_sec` 做成参数，可用 `ros2 param set` 运行时调整，直观体会"安全性 vs 可用性"的取舍。
+
+- **架构演进**：最初看门狗是「旁路」形态（`/cmd_vel_input` → `/cmd_vel`），接入 Nav2 后与
+  `velocity_smoother` 抢同一个话题，导致车一顿一顿；现改为**串联安全层**，详见 §19。
 
 > **涉及文件**：`src/my_first_pkg/src/cmd_vel_watchdog.cpp`
 
@@ -261,6 +264,38 @@
 > **涉及文件**：`src/my_robot_description/config/slam_toolbox.yaml`、
 > `maps/my_map.pgm`、`maps/my_map.yaml`
 
+### 19. Nav2 自主导航
+
+- 用 `nav2_bringup/bringup_launch.py` 拉起完整导航栈：`map_server` + `amcl` + `planner_server` +
+  `controller_server` + `behavior_server` + `bt_navigator` + `velocity_smoother`，
+  由 `lifecycle_manager` 按依赖顺序自动 configure/activate（并靠 bond 监控存活）。
+- **导航是动作**：`NavigateToPose`（`nav2_msgs/action`）—— 有反馈（`distance_remaining`）、
+  可取消，正是 §3 Action 在真实系统里的用法。
+- 地图与定位分工：`map_server` 只把 `my_map.yaml` 作为 `/map` **话题**发出来；
+  AMCL 负责在已知地图上定位，并**发布 `map → odom`** —— 与 slam_toolbox 互斥，同一时间只能有一个。
+- 初始位姿必须显式给出（RViz 的 `2D Pose Estimate`，或 `ros2 topic pub /initialpose`），
+  否则 AMCL 不发 `map → odom`，TF 树里就没有 `map` 这个坐标，所有代价地图会一直刷
+  `Timed out waiting for transform ... frame does not exist`。
+- 按 0.4×0.3 m 的小车改了 6 处参数：`laser_max_range 8.0`、`max_particles 1000`、
+  两个 costmap 的 `robot_radius 0.30`（= √(0.235²+0.18²) 的外接圆）、
+  `max_vel_x / max_speed_xy 0.15`。
+- **架构修复：把看门狗从「旁路」改成「串联安全层」**。原先 watchdog 和 Nav2 都在往
+  `/cmd_vel` 发，互相打架；现在：
+
+  ```
+  Nav2(velocity_smoother) ──┐
+                            ├──▶ /cmd_vel ──▶ watchdog ──▶ /cmd_vel_safe ──▶ 差速插件
+  teleop / 手动 pub ────────┘
+  ```
+
+  差速插件通过 URDF 的 `<ros><remapping>cmd_vel:=cmd_vel_safe</remapping>` 改听话的话题。
+  效果是所有下发底盘的速度**必须**经过看门狗 —— 任何指令源断流，0.5 秒后自动停车
+  （Nav2 进程崩溃也一样）。验证方法：持续发速度 → 掐掉发布进程 → 车应自动停。
+
+> **涉及文件**：`src/my_robot_description/config/nav2_params.yaml`、
+> `src/my_first_pkg/src/cmd_vel_watchdog.cpp`、`src/my_robot_description/urdf/robot.urdf`、
+> `maps/my_map.yaml`
+
 ## 项目结构
 
 ```text
@@ -339,7 +374,8 @@ ros2/
 │       ├── worlds/
 │       │   └── my_world.world        # 仿真场景：地面 + 方块 / 圆柱 / 墙
 │       ├── config/
-│       │   └── slam_toolbox.yaml     # SLAM 参数
+│       │   ├── slam_toolbox.yaml     # SLAM 参数
+│       │   └── nav2_params.yaml      # Nav2 参数（已按 0.4×0.3 m 小车调整）
 │       ├── rviz/
 │       │   └── view.rviz             # 预配置的 RViz 布局
 │       ├── CMakeLists.txt
@@ -644,6 +680,49 @@ ros2 run nav2_map_server map_saver_cli -f maps/my_map
 - **保存要趁 SLAM 节点还在跑** —— 地图只存在于它的内存里，Ctrl+C 之后就没了
 - **建图靠「走」** —— 原地不动永远只有一帧
 
+### 9. Nav2 自主导航
+
+```bash
+# 终端一：Gazebo
+ros2 launch my_robot_description gazebo.launch.py
+
+# 终端二：导航栈（地图与参数都必须显式传）
+ros2 launch nav2_bringup bringup_launch.py \
+  map:=$HOME/ros2/maps/my_map.yaml \
+  params_file:=$(ros2 pkg prefix my_robot_description)/share/my_robot_description/config/nav2_params.yaml \
+  use_sim_time:=true \
+  use_composition:=False
+#   等日志出现：Managed nodes are active
+
+# 终端三：给初始位姿（否则 map→odom 不存在，代价地图会一直超时）
+ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped "{
+  header: {frame_id: map},
+  pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0},
+                orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}
+}"
+
+# 终端四：RViz（用 nav2 自带布局，Fixed Frame 已是 map）
+ros2 run rviz2 rviz2 \
+  -d $(ros2 pkg prefix nav2_bringup)/share/nav2_bringup/rviz/nav2_default_view.rviz \
+  --ros-args -p use_sim_time:=true
+
+# 终端五：发导航目标（导航是 action，--feedback 可看实时进度）
+ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose "{
+  pose: {header: {frame_id: map},
+         pose: {position: {x: 1.0, y: -1.0, z: 0.0}, orientation: {w: 1.0}}}
+}" --feedback
+```
+
+`use_composition:=False` 很关键：默认 `True` 会把 10+ 个节点塞进**一个进程**，日志全混在一起，
+出问题分不清是哪个节点。调试期一定要关掉。
+
+安全层验证（这个测试最能说明架构对不对）：
+
+```bash
+# 让车跑起来，然后直接 Ctrl+C 掐掉这个发布进程 —— 车应在 0.5 秒内自动停
+ros2 topic pub --rate 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.15}}"
+```
+
 ## 环境准备与常用命令
 
 命令速查，避免每次重新翻找。
@@ -771,6 +850,12 @@ pgrep -a gzserver                           # 确认服务端还活着
   扫描匹配与闭环检测，以及「建图必须移动」这一前提。
 - 建立起一套可靠的观测方法：TF 用 `view_frames` 而不是 `echo`、仿真环境统一 `use_sim_time`、
   先看系统负载再判断「话题没数据」。
+- 掌握 Nav2 导航栈的组成与依赖：地图 + AMCL 定位 + 全局规划 + 局部控制 + 行为树，
+  以及「导航是 action」这一接口形态。
+- 理清 `map → odom → base_link` 三段 TF 在导航中的分工，以及「AMCL 不给初始位姿
+  就不发 `map → odom`，进而所有代价地图超时」这条因果链。
+- 学会用「串联」而不是「抢占」组织速度指令链路：`/cmd_vel → watchdog → /cmd_vel_safe → 底盘`，
+  把安全层放在所有指令的必经之路上。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -786,7 +871,10 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [ ] IMU 传感器仿真
 - [x] rosbag2 录制与离线回放
 - [x] SLAM 建图（slam_toolbox）
-- [ ] Nav2 导航框架实践
+- [x] Nav2 导航框架实践（地图 + AMCL + 全局规划 + 局部控制）
+- [ ] Nav2 参数调优（代价地图膨胀半径、控制器参数、恢复行为）
+- [ ] IMU 传感器仿真与融合
+- [ ] rclpy 节点、单元测试、组件容器化部署
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
 
 ## 调试经验（踩坑记录）
@@ -819,6 +907,16 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **录制必须 Ctrl+C 正常退出** | `metadata.yaml` 缺失，bag 打不开 | 异常退出后用 `ros2 bag reindex` 修复 |
 | **改 URDF 后必须 `colcon build`** | 改了没生效 | launch 读的是 `install/` 里的副本，不是 `src/` 原文件 |
 
+### Nav2 相关
+
+| 坑 | 现象 | 原因 / 做法 |
+|---|---|---|
+| **`map` 坐标系是 AMCL 创建的，不是 map_server** | map_server 都 active 了，仍报 `Invalid frame ID "map" ... does not exist` | map_server 只发布 `/map` **话题**；`map` 这个 **TF 坐标**要等 AMCL 收到初始位姿、发出 `map→odom` 才出现 |
+| **latched 话题要设 Durability = Transient Local** | `/map` 明明在发，RViz 里空白且报 QoS warn | `map_server` 用 `TRANSIENT_LOCAL` 发布，RViz 默认 `VOLATILE` 收不到历史消息。在 RViz 里把 Map 的 Durability Policy 改成 `Transient Local` |
+| **插件参数带命名空间** | `ros2 param get /controller_server max_vel_x` 报 `Parameter not set` | 它挂在 `FollowPath:` 插件下，正确读法是 `ros2 param get /controller_server FollowPath.max_vel_x` |
+| **`ros2 topic info -v` 的 `Node name` 混合了发布者与订阅者** | 误以为某节点在「抢」话题 | 只看 `Publisher count` / `Subscription count`；查单个节点用 `ros2 node info <节点名>` |
+| **多个发布者抢同一个 `/cmd_vel`** | 车一顿一顿、或干脆不动 | 用串联架构：`/cmd_vel → watchdog → /cmd_vel_safe → 底盘`，让底盘只监听一个话题 |
+
 ## 开发记录
 
 | 日期 | 内容 |
@@ -830,6 +928,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-31 傍晚** | rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/` |
 | **2026-10-31 晚** | SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑 |
 | **2026-10-31 深夜** | README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法 |
+| **2026-10-31 夜** | Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节 |
 
 ## 说明
 
