@@ -27,12 +27,17 @@
 
 ## 已实现功能
 
+> **路径约定**：下面「涉及文件」里的路径都相对于仓库根目录。为简洁，`src/my_first_pkg/src/` 与
+> `src/my_robot_interfaces/` 这种公共前缀在条目里只写一次，后面直接列文件名。
+
 ### 1. Topic 话题通信
 
 - 实现 Publisher / Subscriber 发布订阅模型。
 - 使用定时器周期性发布消息，订阅端接收并处理消息。
 - 通过 QoS 配置示例，实践 RELIABLE、BEST_EFFORT 等可靠性策略及历史队列深度。
 - 使用 `rclcpp_components` 将节点封装为组件，了解组件化节点的组织方式。
+
+> **涉及文件**（`src/my_first_pkg/src/`）：`my_publisher.cpp`、`my_subscriber.cpp`、`qos_publisher.cpp`、`topic_components.cpp`
 
 ### 2. Service 服务通信与自定义接口
 
@@ -41,17 +46,24 @@
 - 创建自定义服务 `GetDeviceStatus`，根据设备名称返回设备状态信息。
 - 实践自定义接口包的定义、编译及在其他功能包中的调用。
 
+> **涉及文件**：`src/my_first_pkg/src/` 下 `add_server.cpp`、`add_client.cpp`、`device_status_publisher.cpp`、`device_status_subscriber.cpp`、`get_device_status_server.cpp`、`get_device_status_client.cpp`；
+> 接口定义在 `src/my_robot_interfaces/msg/DeviceStatus.msg`、`src/my_robot_interfaces/srv/GetDeviceStatus.srv`
+
 ### 3. Action 动作通信
 
 - 使用 `rclcpp_action` 实现 Action Server 和 Action Client。
 - 实践长时间任务的异步执行、过程反馈及任务取消。
 - 理解 Topic、Service 与 Action 在通信场景上的区别。
 
+> **涉及文件**（`src/my_first_pkg/src/`）：`action_server.cpp`、`action_client.cpp`（基于 `example_interfaces/action/Fibonacci`）
+
 ### 4. 节点生命周期与组件
 
 - 编写 Lifecycle Node，实践 configure、activate、deactivate、cleanup、shutdown 等状态转换。
 - 实现普通节点及其参数、定时器功能。
 - 将节点封装为 `rclcpp_components` 组件，了解组件注册与加载方式。
+
+> **涉及文件**（`src/my_first_pkg/src/`）：`lifecycle_demo.cpp`、`status_node.cpp`、`status_component.cpp`（后两个是"同一个节点的普通版 / 组件版"对照）
 
 ### 5. Executor 与回调组并发控制
 
@@ -62,6 +74,8 @@
 - 通过多回调组 + 多节点组合，实践**任务隔离**：把耗时回调与实时性要求高的回调放进不同组，避免相互阻塞。
 - 用独立工作线程承接耗时操作，把回调本身保持轻量，避免拖慢执行器。
 
+> **涉及文件**（`src/my_first_pkg/src/`）：`executor_single_demo.cpp`、`executor_multi_demo.cpp`、`executor_demo.cpp`、`executor_callback_group_demo.cpp`、`task_isolation_demo.cpp`、`worker_queue_demo.cpp`
+
 ### 6. 进程内通信与零拷贝（Loaned Message）
 
 - 使用 `borrow_loaned_message` / `publish_loaned` 实现**零拷贝**消息发布，跑通 loaned message 完整链路。
@@ -70,6 +84,10 @@
   默认 profile 使用 `OFF`，`/loaned_topic` 使用 `AUTOMATIC`，从而启用 Fast DDS 的数据共享（共享内存）通路。
 - 对比**普通发布**与 **loaned 发布**的端到端延迟，量化零拷贝带来的收益。
 - 实测结论：1 MB 消息、10 Hz 条件下，loaned 方式相比普通方式约有 **30%** 的延迟下降。
+
+> **涉及文件**：`src/my_first_pkg/src/` 下 `loaned_message_demo.cpp`、`loaned_compare.cpp`、`big_loaned_compare.cpp`；
+> 接口 `src/my_robot_interfaces/msg/LoanedData.msg`、`src/my_robot_interfaces/msg/BigLoanedData.msg`；
+> 配置 `DEFAULT_FASTDDS_PROFILES.xml`（仓库根目录）
 
 ### 7. 大块数据传输与内存池复用
 
@@ -82,6 +100,9 @@
   - `bigdata_pool_benchmark`：正常入队策略；
   - `bigdata_pool_benchmark_loss`：**允许丢弃**（队列满即丢），避免发布端被慢订阅者拖住。
 
+> **涉及文件**：`src/my_first_pkg/src/` 下 `bigdata_benchmark.cpp`、`bigdata_pool_benchmark.cpp`、`bigdata_pool_benchmark_loss.cpp`；
+> 接口 `src/my_robot_interfaces/msg/BigData.msg`、`src/my_robot_interfaces/msg/BigLoanedData.msg`
+
 ### 8. 通信延迟测量与问题排查
 
 - 编写 `LatencyData` 消息，携带序号与发送时间戳，用于计算端到端延迟。
@@ -90,11 +111,17 @@
   用于观察**回调并发方式对测量结果的影响**。
 - `bigdata_benchmark` 支持切换通信通路做对照测试：`intra`（进程内）、`dds`（走 DDS）、`ipc_pub` / `ipc_sub`（跨进程）。
 
+> **涉及文件**：`src/my_first_pkg/src/` 下 `latency_publisher.cpp`、`latency_subscriber.cpp`、`bigdata_benchmark.cpp`；
+> 接口 `src/my_robot_interfaces/msg/LatencyData.msg`
+
 ### 9. 参数管理
 
 - 使用 `declare_parameter` 声明参数并读取参数值。
 - 通过命令行和 YAML 文件传递节点参数。
 - 注册参数变更回调，实践运行过程中的动态参数修改。
+
+> **涉及文件**（`src/my_first_pkg/src/`）：`parameter_demo.cpp`（参数 `speed`）、`status_node.cpp`（参数 `interval_ms`）；
+> 参数文件 `src/my_first_pkg/config/parameter_demo.yaml`、`src/my_first_pkg/config/params.yaml`
 
 ### 10. TF2 坐标变换
 
@@ -105,6 +132,10 @@
 - 实践四元数与欧拉角转换、四元数乘法等姿态表示基础。
 - 实现激光雷达点数据发布，以及从 `laser` 坐标系到 `base_link` 坐标系的点变换。
 
+> **涉及文件**（`src/my_first_pkg/src/`）：`tf2_broadcaster_demo.cpp`、`tf2_listener_demo.cpp`、
+> `tf2_odom_broadcaster_demo.cpp`、`tf2_point_transform_demo.cpp`、`quaternion_demo.cpp`、
+> `laser_point_publisher.cpp`、`laser_point_transformer.cpp`
+
 ### 11. URDF 机器人模型与 RViz2 可视化
 
 - 新建 `my_robot_description` 功能包，用于存放机器人模型与可视化配置。
@@ -113,11 +144,18 @@
 - 使用 `joint_state_publisher_gui` 拖动滑块驱动轮子关节，观察关节角度与 TF 的联动。
 - RViz 配置以文件形式随包安装（`rviz/view.rviz`），launch 时通过 `-d` 加载，无需每次手动配置显示项。
 
+> **涉及文件**：`src/my_robot_description/urdf/robot.urdf`、`src/my_robot_description/launch/display.launch.py`、
+> `src/my_robot_description/rviz/view.rviz`、`src/my_robot_description/CMakeLists.txt`、`src/my_robot_description/package.xml`
+
 ### 12. Launch 启动管理
 
 - 使用 Python 编写 launch 文件。
 - 实践多个节点的统一启动、参数传递及话题重映射。
 - 通过 launch 文件组织多个节点的运行流程。
+
+> **涉及文件**：`src/my_first_pkg/launch/demo.launch.py`（启动 `my_publisher`、`my_subscriber`、`parameter_demo`，加载 `parameter_demo.yaml`）、
+> `src/my_first_pkg/launch/multi_node.launch.py`（启动 `my_publisher`、`status_node`，加载 `params.yaml`）、
+> `src/my_robot_description/launch/display.launch.py`（启动 `robot_state_publisher` + RViz2）
 
 ## 项目结构
 
@@ -325,6 +363,76 @@ ros2 topic list
 ros2 topic echo /my_topic
 ros2 topic hz /my_topic          # 观察实际发布频率
 ```
+
+### 5. 全部 Demo 一览
+
+`my_first_pkg` 下共有 **35 个可执行目标**（另有 2 个组件 `status_component` / `topic_components`，
+需要通过组件容器加载，不是独立可执行文件）。
+
+下表的「运行方式」列都省略了前缀 `ros2 run my_first_pkg`，实际运行时补上即可。
+**未标注参数的，直接运行就够**；标注「与 xxx 配对」的，表示需要另一个目标同时运行才能看到效果。
+
+| 分类 | 目标 | 用途 | 运行方式 / 说明 |
+|---|---|---|---|
+| 话题 | `my_publisher` | 向 `/my_topic` 发布 `std_msgs/String` | 与 `my_subscriber` 配对 |
+| 话题 | `my_subscriber` | 订阅 `/my_topic` 并打印 | 与 `my_publisher` 配对 |
+| 话题 | `qos_publisher` | 向 `qos_topic` 发布，演示 QoS 可靠性 / 队列深度 | 用 `ros2 topic echo --qos-reliability best_effort` 等方式对照观察 |
+| 服务 | `add_server` | `example_interfaces/srv/AddTwoInts` 服务端（服务名 `add_two_ints`） | 与 `add_client` 配对 |
+| 服务 | `add_client` | `AddTwoInts` 客户端，两个整数由命令行传入 | `add_client 3 5` |
+| 自定义消息 | `device_status_publisher` | 发布 `my_robot_interfaces/msg/DeviceStatus` | 与 `device_status_subscriber` 配对 |
+| 自定义消息 | `device_status_subscriber` | 订阅 `DeviceStatus`，按温度判断 | 与 `device_status_publisher` 配对 |
+| 自定义服务 | `get_device_status_server` | `my_robot_interfaces/srv/GetDeviceStatus` 服务端 | 与 `get_device_status_client` 配对 |
+| 自定义服务 | `get_device_status_client` | `GetDeviceStatus` 客户端 | 与 `get_device_status_server` 配对 |
+| 动作 | `action_server` | `example_interfaces/action/Fibonacci` 动作服务端 | 与 `action_client` 配对 |
+| 动作 | `action_client` | Fibonacci 动作客户端，含反馈回调与取消 | 与 `action_server` 配对 |
+| 生命周期 | `lifecycle_demo` | 生命周期节点 `lifecycle_demo`，五态转换 | 需配合 `ros2 lifecycle set/get`，见下方示例 |
+| 节点 | `status_node` | 普通节点 + 参数 `interval_ms` + 定时器 | `--ros-args -p interval_ms:=500` |
+| 执行器 | `executor_single_demo` | 单线程执行器：多个回调串行 | 直接运行 |
+| 执行器 | `executor_multi_demo` | 多线程执行器：多个回调并发 | 直接运行 |
+| 执行器 | `executor_demo` | 两个定时器 A / B，对比回调是否互相阻塞 | 直接运行，观察日志交错顺序 |
+| 回调组 | `executor_callback_group_demo` | `MutuallyExclusive` 与 `Reentrant` 回调组的线程表现 | 直接运行，日志里打印线程 ID |
+| 回调组 | `task_isolation_demo` | 多回调组把耗时任务与实时任务隔离 | 直接运行 |
+| 回调组 | `worker_queue_demo` | 独立工作线程 + 任务队列承接耗时操作 | 直接运行 |
+| 参数 | `parameter_demo` | 参数 `speed`：命令行 / YAML / 运行时修改 | 见上文「参数管理」一节 |
+| 零拷贝 | `loaned_message_demo` | 先用 `can_borrow` 判断支持性，再跑 loaned 发布 | 需在 `~/ros2` 目录下运行（读取 Fast DDS profile） |
+| 零拷贝 | `loaned_compare` | 普通发布 vs loaned 发布的延迟对比 | 第一个参数 `normal` 或 `loaned`，第二个为频率 Hz，如 `loaned_compare loaned 30` |
+| 零拷贝 | `big_loaned_compare` | 同上，但消息体为 1 MB 定长 | `big_loaned_compare normal 10` / `big_loaned_compare loaned 10` |
+| 大消息 | `bigdata_benchmark` | 大消息在四条通路上的对比：进程内 / DDS / 跨进程 | `bigdata_benchmark intra 1 10`、`bigdata_benchmark dds 1 10`、`bigdata_benchmark ipc_pub 1 10`（另开终端跑 `bigdata_benchmark ipc_sub`） |
+| 大消息 | `bigdata_pool_benchmark` | 内存池复用缓冲区，对比分配开销 | 直接运行 |
+| 大消息 | `bigdata_pool_benchmark_loss` | 内存池 + 队列满即丢弃，不阻塞发布端 | 直接运行，与上一个对照 |
+| 延迟 | `latency_publisher` | 延迟测量发布端（`LatencyData` 带序号与时间戳） | 与 `latency_subscriber` 配对 |
+| 延迟 | `latency_subscriber` | 延迟测量订阅端，可切换回调组 | `--ros-args -p callback_mode:=reentrant` |
+| TF2 | `tf2_broadcaster_demo` | 广播 `base_link → laser` 变换 | 直接运行 |
+| TF2 | `tf2_listener_demo` | 查询 `laser` / `odom` 之间的变换 | 需先有 broadcaster 在发布 |
+| TF2 | `tf2_odom_broadcaster_demo` | 模拟里程计，广播 `odom → base_link` | 直接运行，位置随时间推进 |
+| TF2 | `tf2_point_transform_demo` | 把一个点从 A 坐标系换算到 B 坐标系 | 直接运行 |
+| TF2 | `laser_point_publisher` | 发布 `/laser_point`（`laser` 坐标系下的点） | 与 `laser_point_transformer` 配对 |
+| TF2 | `laser_point_transformer` | 用 `lookupTransform` 把激光点变换到 `base_link` | 需 broadcaster 提供 `base_link → laser` |
+| 其它 | `quaternion_demo` | 四元数与欧拉角互转、四元数乘法 | 直接运行，只看日志输出 |
+
+生命周期节点的完整操作流程：
+
+```bash
+# 终端一：启动节点
+ros2 run my_first_pkg lifecycle_demo
+
+# 终端二：查看并驱动状态机
+ros2 lifecycle get  /lifecycle_demo
+ros2 lifecycle set  /lifecycle_demo configure    # unconfigured -> inactive
+ros2 lifecycle set  /lifecycle_demo activate     # inactive     -> active
+ros2 lifecycle set  /lifecycle_demo deactivate   # active       -> inactive
+ros2 lifecycle set  /lifecycle_demo cleanup      # inactive     -> unconfigured
+ros2 lifecycle set  /lifecycle_demo shutdown
+```
+
+URDF 模型与 RViz2 可视化通过 launch 启动（属于 `my_robot_description` 包）：
+
+```bash
+ros2 launch my_robot_description display.launch.py
+```
+
+> 提醒：`loaned_message_demo` / `loaned_compare` / `big_loaned_compare` 依赖 Fast DDS 的
+> `data_sharing` 配置，需要在 `~/ros2` 目录下运行才能自动读到 `DEFAULT_FASTDDS_PROFILES.xml`。
 
 ## 实践与技术收获
 
