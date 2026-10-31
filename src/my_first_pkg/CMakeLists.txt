@@ -52,6 +52,14 @@ find_package(rclcpp_lifecycle REQUIRED)
 # 组件
 find_package(rclcpp_components REQUIRED)
 
+# 图像处理
+find_package(sensor_msgs REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(OpenCV REQUIRED)
+
+
+include_directories(${OpenCV_INCLUDE_DIRS})
+
 # ============================================================
 # 二、Topic：基础发布者与订阅者
 # ============================================================
@@ -492,6 +500,18 @@ ament_target_dependencies(big_loaned_compare
 )
 
 
+# 速度指令看门狗（超时自动停车）
+add_executable(cmd_vel_watchdog src/cmd_vel_watchdog.cpp)
+ament_target_dependencies(cmd_vel_watchdog rclcpp geometry_msgs)
+
+
+
+# 相机图像处理（cv_bridge + OpenCV）
+add_executable(image_processor src/image_processor.cpp)
+ament_target_dependencies(image_processor rclcpp sensor_msgs cv_bridge)
+target_link_libraries(image_processor ${OpenCV_LIBS})
+
+
 # ============================================================
 # 十、安装所有可执行程序
 # ============================================================
@@ -567,6 +587,12 @@ install(
     # 大数据比对
     big_loaned_compare
     
+
+    # 速度指令看门狗
+    cmd_vel_watchdog
+
+    # 图像处理
+    image_processor
 
   DESTINATION lib/${PROJECT_NAME}
 )

@@ -1,0 +1,4 @@
+/image_processor:
+  ros__parameters:
+    canny_low: 100
+    canny_high: 200

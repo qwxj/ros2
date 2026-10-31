@@ -119,9 +119,15 @@
 - 使用 `declare_parameter` 声明参数并读取参数值。
 - 通过命令行和 YAML 文件传递节点参数。
 - 注册参数变更回调，实践运行过程中的动态参数修改。
+- `image_processor` 把 Canny 双阈值做成参数，注册 `add_on_set_parameters_callback` 响应运行时
+  `ros2 param set`，并做范围校验（`0 <= canny_low < canny_high <= 255`），非法值直接拒绝。
+- 参数持久化：写进 `config/image_processor.yaml`（必须带节点名 + `ros__parameters`），
+  通过 launch 的 `parameters=[yaml_path]` 或命令行 `--params-file` 加载。
+  优先级为 **默认值 < YAML < 运行时 `param set`**（后者重启即失效）。
 
 > **涉及文件**（`src/my_first_pkg/src/`）：`parameter_demo.cpp`（参数 `speed`）、`status_node.cpp`（参数 `interval_ms`）；
-> 参数文件 `src/my_first_pkg/config/parameter_demo.yaml`、`src/my_first_pkg/config/params.yaml`
+> 参数文件 `src/my_first_pkg/config/parameter_demo.yaml`、`src/my_first_pkg/config/params.yaml`、
+> `src/my_first_pkg/config/image_processor.yaml`；参数化节点 `src/my_first_pkg/src/image_processor.cpp`
 
 ### 10. TF2 坐标变换
 
@@ -147,7 +153,67 @@
 > **涉及文件**：`src/my_robot_description/urdf/robot.urdf`、`src/my_robot_description/launch/display.launch.py`、
 > `src/my_robot_description/rviz/view.rviz`、`src/my_robot_description/CMakeLists.txt`、`src/my_robot_description/package.xml`
 
-### 12. Launch 启动管理
+### 12. Gazebo 物理仿真与差速驱动
+
+- 为 URDF 补齐物理属性：每个 link 加 `<inertial>`（质量 + 惯性张量）与 `<collision>`，
+  否则模型在 Gazebo 里没有质量、会直接穿过地面。
+- 前后各加一个**万向轮（caster）**，解决"两个轮子撑不住车体、一落地就前后翻"的问题；
+  并把 caster 的摩擦系数设为 0，避免固定球体在地上"刮"住车。
+- 使用 `libgazebo_ros_diff_drive.so` 实现差速驱动：订阅 `/cmd_vel`、发布 `/odom` 与
+  `odom → base_footprint` 变换，并直接发布轮子 TF（因此不需要 `joint_state_publisher`）。
+- 用 `.world`（SDF）文件搭建可复现的测试场景：地面 + 三个障碍物（方块 / 圆柱 / 墙）。
+- `launch/gazebo.launch.py` 用 `IncludeLaunchDescription` + `launch_arguments` 传入 world 文件
+  并生成模型；`use_sim_time: true` 让 TF 时间戳跟随仿真时钟。
+
+> **涉及文件**：`src/my_robot_description/urdf/robot.urdf`、`src/my_robot_description/launch/gazebo.launch.py`、
+> `src/my_robot_description/worlds/my_world.world`
+
+### 13. 速度指令看门狗（cmd_vel_watchdog）
+
+- `/cmd_vel` 是**设定值**而非一次性命令：差速驱动插件会把最后收到的速度一直保持下去，
+  遥控端掉线时机器人会一直冲（Gazebo 的差速插件本身**没有任何超时机制**）。
+- 自写节点 `cmd_vel_watchdog`：把 `/cmd_vel_input` 转发到 `/cmd_vel`；
+  若 `timeout_sec` 内没有新指令，就主动发布**全零**（注意不是"停止发布"——停止发不会刹车）。
+- 超时用 `std::chrono::steady_clock` 而不是 `this->now()`：Gazebo 一旦暂停，ROS 时间会冻住，
+  用仿真时间会让看门狗**彻底失效且不报错**。
+- 超时阈值必须**大于**指令发布周期（`τ ≥ 2~3 × T`），否则每个周期都会误报，
+  机器人表现为"走一下、停一下"。
+- `timeout_sec` 做成参数，可用 `ros2 param set` 运行时调整，直观体会"安全性 vs 可用性"的取舍。
+
+> **涉及文件**：`src/my_first_pkg/src/cmd_vel_watchdog.cpp`
+
+### 14. 激光雷达与仿真环境
+
+- 在车顶加 `lidar_link`（fixed 关节），用 `<sensor type="ray">` + `libgazebo_ros_ray_sensor.so`
+  输出二维扫描；`output_type` 必须显式写 `sensor_msgs/LaserScan`（不写默认是 `PointCloud2`）。
+- 通过 `~/out:=scan` 重映射把话题改成 `/scan`，用 `frame_name` 指定 `frame_id`。
+- 扫描参数：360 线 × 整圈（±π）、量程 0.12~8 m，并叠加 σ=1 cm 高斯噪声以贴近真实雷达。
+- 实测 `/scan` 约 9.9 Hz（配置 10 Hz）；`angle_increment` 为 0.0175 rad ——
+  Gazebo 用的是 `(max-min)/(samples-1)`，与 ROS 惯例的 `/samples` 不同，读数要以消息字段为准。
+- 空世界里雷达全是 `inf`（水平扫描打不到地面）；加入障碍物后测距值与几何尺寸吻合
+  （墙在 x=-2.0 时读数约 1.94~2.07 m）。
+
+> **涉及文件**：`src/my_robot_description/urdf/robot.urdf`、`src/my_robot_description/worlds/my_world.world`
+
+### 15. 相机与 cv_bridge 图像处理
+
+- 车头加 `camera_link`，用 `<sensor type="camera">` + `libgazebo_ros_camera.so`
+  输出 640×480、`rgb8`、15 fps。
+- 相机插件的话题命名规则是 `/<namespace>/<camera_name>/image_raw`，
+  `namespace` 与 sensor 的 `name` 会**叠加** —— 两者都叫 `camera` 会得到 `/camera/camera/image_raw`，
+  只保留 sensor name 才是 `/camera/image_raw`。
+- 图像处理节点 `image_processor`：用 `cv_bridge::toCvCopy(msg, "bgr8")` 把 ROS 图像转成 `cv::Mat`
+  （同时把 `rgb8` 转成 OpenCV 习惯的 BGR），再做灰度化 + Canny 边缘检测。
+- 反向打包用 `cv_bridge::CvImage`：必须**继承原消息的 `header`**（时间戳 + frame_id），
+  `encoding` 要设成 `mono8`（单通道）；发布时需 `publish(*out_msg.toImageMsg())` 解引用，
+  因为 `Publisher::publish()` 没有接受 `shared_ptr` 的重载。
+- 在 RViz2 用 `Image` 显示项验证：绿方块占 181×180 像素，Canny 边缘 bbox 与之完全重合，
+  边缘像素 724 ≈ 矩形周长 2×(181+180)=722。
+
+> **涉及文件**：`src/my_first_pkg/src/image_processor.cpp`、`src/my_first_pkg/config/image_processor.yaml`、
+> `src/my_first_pkg/launch/image_processor.launch.py`
+
+### 16. Launch 启动管理
 
 - 使用 Python 编写 launch 文件。
 - 实践多个节点的统一启动、参数传递及话题重映射。
@@ -162,7 +228,7 @@
 ```text
 ros2/
 ├── src/
-│   ├── my_first_pkg/                 # ROS 2 示例功能包（37 个 C++ 源文件）
+│   ├── my_first_pkg/                 # ROS 2 示例功能包（39 个 C++ 源文件）
 │   │   ├── src/                      # 各功能示例的 C++ 源码
 │   │   │   ├── my_publisher.cpp            # 话题：发布
 │   │   │   ├── my_subscriber.cpp           # 话题：订阅
@@ -200,13 +266,17 @@ ros2/
 │   │   │   ├── tf2_odom_broadcaster_demo.cpp    # TF2：里程计
 │   │   │   ├── tf2_point_transform_demo.cpp     # TF2：点坐标转换
 │   │   │   ├── laser_point_publisher.cpp        # TF2：激光点发布
-│   │   │   └── laser_point_transformer.cpp      # TF2：激光点跨坐标系变换
+│   │   │   ├── laser_point_transformer.cpp      # TF2：激光点跨坐标系变换
+│   │   │   ├── cmd_vel_watchdog.cpp             # 速度指令看门狗（超时自动停车）
+│   │   │   └── image_processor.cpp              # 相机 + cv_bridge + OpenCV 边缘检测
 │   │   ├── launch/                   # launch 启动文件
 │   │   │   ├── demo.launch.py
-│   │   │   └── multi_node.launch.py
+│   │   │   ├── multi_node.launch.py
+│   │   │   └── image_processor.launch.py
 │   │   ├── config/                   # YAML 参数配置
 │   │   │   ├── parameter_demo.yaml
-│   │   │   └── params.yaml
+│   │   │   ├── params.yaml
+│   │   │   └── image_processor.yaml
 │   │   ├── CMakeLists.txt
 │   │   └── package.xml
 │   │
@@ -222,11 +292,14 @@ ros2/
 │   │   ├── CMakeLists.txt
 │   │   └── package.xml
 │   │
-│   └── my_robot_description/         # 机器人描述与可视化
+│   └── my_robot_description/         # 机器人描述、仿真与可视化
 │       ├── urdf/
-│       │   └── robot.urdf            # 两轮差速小车
+│       │   └── robot.urdf            # 两轮差速小车（含 inertial/collision、雷达、相机）
 │       ├── launch/
-│       │   └── display.launch.py     # 启动 robot_state_publisher + RViz2
+│       │   ├── display.launch.py     # 只启动 robot_state_publisher + RViz2（无物理）
+│       │   └── gazebo.launch.py      # 启动 Gazebo + 生成模型 + 看门狗
+│       ├── worlds/
+│       │   └── my_world.world        # 仿真场景：地面 + 方块 / 圆柱 / 墙
 │       ├── rviz/
 │       │   └── view.rviz             # 预配置的 RViz 布局
 │       ├── CMakeLists.txt
@@ -364,7 +437,43 @@ ros2 topic echo /my_topic
 ros2 topic hz /my_topic          # 观察实际发布频率
 ```
 
-### 5. 全部 Demo 一览
+### 5. Gazebo 仿真（URDF / 雷达 / 相机 / 看门狗）
+
+```bash
+# 终端一：启动仿真（Gazebo + robot_state_publisher + 模型生成 + 看门狗）
+ros2 launch my_robot_description gazebo.launch.py
+
+# 终端二：RViz2，跟随仿真时钟
+ros2 run rviz2 rviz2 \
+  -d $(ros2 pkg prefix my_robot_description)/share/my_robot_description/rviz/view.rviz \
+  --ros-args -p use_sim_time:=true
+
+# 终端三：开车（注意发到 cmd_vel_input，经过看门狗）
+ros2 topic pub --rate 10 /cmd_vel_input geometry_msgs/msg/Twist "{linear: {x: 0.15}}"
+ros2 topic pub --once /cmd_vel_input geometry_msgs/msg/Twist "{linear: {x: 0.0}}"
+
+# 键盘遥控（把 teleop 的输出重映射到 cmd_vel_input）
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=cmd_vel_input
+
+# 终端四：图像处理（参数从 YAML 读）
+ros2 launch my_first_pkg image_processor.launch.py
+```
+
+> **参数位置很关键**：`rviz2` 的 `-d` 是程序自身参数，必须放在 `--ros-args` **之前**；
+> `use_sim_time` 是 ROS 参数，必须放在**之后**。写反会报 `UnknownROSArgsError`。
+
+仿真中各话题的期望值：
+
+| 话题 | 来源 | 期望 |
+|---|---|---|
+| `/clock` | Gazebo | ~1000 Hz |
+| `/odom` | 差速驱动插件 | ~50 Hz |
+| `/scan` | 激光雷达插件 | ~10 Hz，`sensor_msgs/LaserScan` |
+| `/camera/image_raw` | 相机插件 | ~10–15 Hz，`rgb8` 640×480 |
+| `/image_processed` | image_processor | ~10 Hz，`mono8` 边缘图 |
+| `/cmd_vel` | cmd_vel_watchdog | 20 Hz（无指令时输出全零） |
+
+### 6. 全部 Demo 一览
 
 `my_first_pkg` 下共有 **35 个可执行目标**（另有 2 个组件 `status_component` / `topic_components`，
 需要通过组件容器加载，不是独立可执行文件）。
@@ -408,6 +517,8 @@ ros2 topic hz /my_topic          # 观察实际发布频率
 | TF2 | `tf2_point_transform_demo` | 把一个点从 A 坐标系换算到 B 坐标系 | 直接运行 |
 | TF2 | `laser_point_publisher` | 发布 `/laser_point`（`laser` 坐标系下的点） | 与 `laser_point_transformer` 配对 |
 | TF2 | `laser_point_transformer` | 用 `lookupTransform` 把激光点变换到 `base_link` | 需 broadcaster 提供 `base_link → laser` |
+| 仿真 | `cmd_vel_watchdog` | 速度指令看门狗：超时自动停车 | 订阅 `/cmd_vel_input`，发布 `/cmd_vel`；`--ros-args -p timeout_sec:=0.5` |
+| 仿真 | `image_processor` | 相机图像 → cv_bridge → OpenCV 边缘检测 | 订阅 `/camera/image_raw`，发布 `/image_processed` |
 | 其它 | `quaternion_demo` | 四元数与欧拉角互转、四元数乘法 | 直接运行，只看日志输出 |
 
 生命周期节点的完整操作流程：
@@ -450,17 +561,39 @@ ros2 launch my_robot_description display.launch.py
 - 掌握参数声明、配置文件加载和动态修改的基本方法。
 - 理解 TF2 坐标树、坐标变换查询及点坐标转换流程。
 - 掌握 URDF 模型的编写方式，理解 link / joint 与 TF 树的对应关系。
+- 掌握 Gazebo 仿真的完整链路：`<inertial>` / `<collision>` 的作用、差速驱动插件的参数含义、
+  `use_sim_time` 与仿真时钟的关系。
+- 理解 `/cmd_vel` 是"设定值"而非事件，掌握用超时看门狗防止机器人失控的方法与阈值取舍。
+- 理解 Gazebo 各传感器插件的 SDF 标签含义，以及话题命名（namespace / camera_name 叠加）规则。
+- 掌握 `cv_bridge` 的双向转换（`toCvCopy` / `CvImage::toImageMsg`）、`rgb8` 与 `bgr8` 的差异，
+  以及处理图像节点必须继承 `header` 的原因。
+- 掌握 ROS 2 参数的运行时更新（`add_on_set_parameters_callback` + 校验）与持久化（YAML + launch）。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
 
 - [x] URDF 机器人模型与机器人状态发布
 - [x] RViz2 机器人模型及传感器数据可视化
-- [ ] 传感器模型：激光雷达 / 相机 / IMU 的 Gazebo 仿真插件
-- [ ] Gazebo 仿真环境下的差速驱动与键盘遥控
+- [x] Gazebo 仿真环境与带障碍物的 world
+- [x] 差速驱动、里程计与键盘遥控
+- [x] 速度指令看门狗（超时自动停车）
+- [x] 激光雷达（`/scan`）与相机（`/camera/image_raw`）仿真
+- [x] 相机图像处理：cv_bridge + OpenCV 边缘检测
+- [x] 参数持久化（YAML + launch 加载）
+- [ ] IMU 传感器仿真
+- [ ] rosbag2 录制与离线回放
 - [ ] SLAM 建图（slam_toolbox）
 - [ ] Nav2 导航框架实践
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
+
+## 开发记录
+
+| 日期 | 内容 |
+|---|---|
+| **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
+| **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
+| **2026-10-31 上午** | 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件 |
+| **2026-10-31 下午** | 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载） |
 
 ## 说明
 
