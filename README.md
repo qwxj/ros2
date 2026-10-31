@@ -644,6 +644,103 @@ ros2 run nav2_map_server map_saver_cli -f maps/my_map
 - **保存要趁 SLAM 节点还在跑** —— 地图只存在于它的内存里，Ctrl+C 之后就没了
 - **建图靠「走」** —— 原地不动永远只有一帧
 
+## 环境准备与常用命令
+
+命令速查，避免每次重新翻找。
+
+### 1. 依赖安装（一次性）
+
+Ubuntu 22.04 + ROS 2 Humble。以下为本工作区实际用到的 apt 包（版本已验证）。
+
+```bash
+sudo apt update
+
+# 基础（已含 rclcpp / rviz2 / rosbag2 / tf2 等）
+sudo apt install -y ros-humble-desktop
+
+# Gazebo 仿真
+sudo apt install -y ros-humble-gazebo-ros-pkgs ros-humble-gazebo-plugins ros-humble-gazebo-dev
+
+# 机器人模型与状态发布
+sudo apt install -y ros-humble-xacro ros-humble-robot-state-publisher ros-humble-joint-state-publisher
+
+# TF 调试工具（view_frames / tf2_echo / tf2_monitor）
+sudo apt install -y ros-humble-tf2-tools
+
+# 相机图像处理
+sudo apt install -y ros-humble-cv-bridge ros-humble-rqt-image-view \
+  ros-humble-image-transport libopencv-dev
+
+# 键盘遥控
+sudo apt install -y ros-humble-teleop-twist-keyboard
+
+# SLAM 建图 + 地图保存
+sudo apt install -y ros-humble-slam-toolbox ros-humble-nav2-map-server
+
+# Nav2 导航（第 7 步用，尚未配置）
+sudo apt install -y ros-humble-nav2-bringup ros-humble-nav2-amcl \
+  ros-humble-nav2-controller ros-humble-nav2-planner \
+  ros-humble-nav2-bt-navigator ros-humble-nav2-lifecycle-manager \
+  ros-humble-behaviortree-cpp-v3
+```
+
+装完建议打一个 VMware 快照 —— Nav2 依赖树深，配置出错时回滚比重装划算。
+
+### 2. 查询速查
+
+| 目的 | 命令 |
+|---|---|
+| 列出节点 / 话题 | `ros2 node list` / `ros2 topic list` |
+| 话题频率 | `ros2 topic hz /scan` |
+| 发布者与订阅者（含 QoS） | `ros2 topic info /scan -v` |
+| 消息类型 | `ros2 topic type /scan` |
+| 取一条消息的某个字段 | `ros2 topic echo /scan --once --field header.frame_id` |
+| 读 latched 话题 | `ros2 topic echo /tf_static --once --qos-durability transient_local` |
+| 节点的参数表 | `ros2 param list /image_processor` |
+| 读 / 改参数 | `ros2 param get ... canny_low` / `ros2 param set ... canny_low 120` |
+| 导出参数 | `ros2 param dump /image_processor > /tmp/p.yaml` |
+| 一个节点发布/订阅了什么 | `ros2 node info /slam_toolbox` |
+| bag 内容 | `ros2 bag info bags/drive_01` |
+| 包安装路径（拼文件路径用） | `ros2 pkg prefix my_robot_description` |
+
+拼接包内文件路径的常用写法：
+
+```bash
+$(ros2 pkg prefix my_robot_description)/share/my_robot_description/config/slam_toolbox.yaml
+```
+
+### 3. 仿真环境专用：TF 查询必须带 `use_sim_time`
+
+仿真里的 TF 用**仿真时间**戳，而 `tf2_echo` / `view_frames` 默认按**系统时间**查询 ——
+不加参数会报 `frame does not exist`（明明存在）。**这是最容易踩的假阴性。**
+
+```bash
+# 查两帧之间的关系
+ros2 run tf2_ros tf2_echo odom base_footprint --ros-args -p use_sim_time:=true
+ros2 run tf2_ros tf2_echo map odom            --ros-args -p use_sim_time:=true
+
+# 一次性导出整棵 TF 树（比 echo 可靠，QoS 正确且容错）
+ros2 run tf2_tools view_frames --ros-args -p use_sim_time:=true
+evince frames_*.pdf        # 生成的 PDF
+```
+
+同理，任何带 `use_sim_time` 的节点（RViz2、slam_toolbox、AMCL）都要显式设为 `true`。
+
+### 4. 性能与降载
+
+Gazebo GUI（`gzclient`）单独就能吃掉近一半 CPU，调算法时它是纯浪费。
+
+```bash
+uptime                                      # load average；4 核接近 4 就是饱和
+ps -eo pcpu,pmem,comm --sort=-pcpu | head -6
+
+pkill gzclient                              # 只留 gzserver，可视化交给 RViz
+pgrep -a gzserver                           # 确认服务端还活着
+```
+
+判据：`ros2 topic hz /clock` 应该在几百 Hz 以上。如果只有 10 Hz 左右，说明仿真已经
+跑不动了（RTF 极低），此时话题频率、SLAM 建图都会异常 —— **先降载，再排查算法**。
+
 ## 实践与技术收获
 
 通过这些示例，对 ROS 2 的开发流程和底层机制进行了实践，主要包括：
@@ -732,6 +829,7 @@ ros2 run nav2_map_server map_saver_cli -f maps/my_map
 | **2026-10-31 下午** | 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载） |
 | **2026-10-31 傍晚** | rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/` |
 | **2026-10-31 晚** | SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑 |
+| **2026-10-31 深夜** | README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法 |
 
 ## 说明
 
