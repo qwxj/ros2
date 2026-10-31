@@ -296,6 +296,92 @@
 > `src/my_first_pkg/src/cmd_vel_watchdog.cpp`、`src/my_robot_description/urdf/robot.urdf`、
 > `maps/my_map.yaml`
 
+### 20. Nav2 参数调优：离线实验方法
+
+- **要解决的问题**：在线调参时每次都要开 Gazebo、开车、复位，输入条件一直在变 ——
+  改了参数后车走得好了，也说不清是参数起了作用还是这次起点恰好更准。
+- **方法**：录一段**车全程静止**的 bag 作为固定输入，离线回放给 Nav2；
+  位姿恒定，**只改一个参数**，对比规划器输出的 `/plan`。
+- **关键认知：离线回放是"开环"的**。bag 里的 `/odom`、`/tf` 决定机器人位姿，
+  Nav2 输出的 `/cmd_vel` **不会**驱动机器人（没有物理引擎消费它）。
+  所以离线能对比的是「**决策**」（`/plan`、`/local_plan`、`/cmd_vel` 数值），
+  不能对比「**结果**」（到达时间、实际行驶轨迹 —— 那些完全由 bag 决定）。
+- **实验台**：`bags/tune_idle`，187 s，车全程静止（`/odom` 位移跨度 **0.0008 m**、
+  yaw 跨度 **0.03°**），含 `/scan` 1857 帧 · `/odom` 9285 条 · `/tf` 27855 条 · `/tf_static` 1 条。
+- **度量工具**：`tools/bag_metrics.py` 直接读 `.db3`，输出全局路径长度/点数、速度统计、
+  最近障碍距离，支持多个 bag 并排对比 —— **调参不能靠"看着顺眼"，要有数字**。
+
+> **涉及文件**：`tools/bag_metrics.py`、`src/my_robot_description/config/nav2_params.yaml`
+
+#### 实验一：`inflation_radius` 对全局路径的影响
+
+目标点选 **(2.8, 0.0)**：从原点 (0,0) 出发的直线**必须穿过方块 (2.0, 0.0)**
+（方块占 x∈[1.75, 2.25]、y∈[-0.25, 0.25]），因此必然绕行。该点距最近障碍 0.50 m、直线距离 2.80 m。
+
+| `inflation_radius` | 路径长度 | 路径点数 | 相对直线 2.80 m |
+|---|---|---|---|
+| **0.55**（Nav2 默认） | **3.77 m** | 150 | +0.97 m（**+35%**） |
+| **0.35**（改后） | **3.44 m** | 138 | +0.64 m（+23%） |
+| **差异** | **−0.33 m（−8.8%）** | −12 | −0.33 m |
+
+**结论**：膨胀半径从 0.55 降到 0.35，绕障路径缩短 0.33 m。
+在 5.5×4 m 的房间 + 0.4×0.3 m 小车这个尺度下，0.55（= 车半径 0.30 + 0.25 余量）确实偏保守。
+
+#### 对照：目标点选错，就测不出差异
+
+把目标换成 **(1.0, -1.0)**（这条线上没有任何障碍物），在 `inflation_radius: 0.55` 下：
+
+| 项 | 值 |
+|---|---|
+| 路径长度 | **1.43 m** |
+| 直线距离 | 1.414 m |
+| 差值 | **+1.6 cm（+1.1%）** |
+
+同样的参数、同样的小车，换个目标点，影响从 **+35%** 掉到 **+1.1%** ——
+说明**膨胀半径只在路径经过障碍物附近时才起作用**。
+实验设计（目标点怎么选）比参数本身更影响结论的可信度。
+
+#### 实验流程
+
+```bash
+# ① 录制固定输入（Gazebo 中，车全程静止不动）
+ros2 bag record -o bags/tune_idle /scan /odom /tf /tf_static
+
+# ② 改参数后重启 Nav2（参数只在启动时读取，不用 colcon build）
+ros2 launch nav2_bringup bringup_launch.py \
+  map:=$HOME/ros2/maps/my_map.yaml \
+  params_file:=$HOME/ros2/src/my_robot_description/config/nav2_params.yaml \
+  use_sim_time:=true use_composition:=False
+
+# ③ 验证参数真的生效（插件参数必须带插件名前缀）
+ros2 param get /global_costmap/global_costmap inflation_layer.inflation_radius
+
+# ④ 回放固定输入
+ros2 bag play bags/tune_idle --clock 1000
+
+# ⑤ 录制决策输出
+ros2 bag record -o bags/plan_inf035 /plan /cmd_vel /local_plan
+
+# ⑥ 发同一个目标点
+ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose "{
+  pose: {header: {frame_id: map},
+         pose: {position: {x: 2.8, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}
+}" --feedback
+
+# ⑦ 并排对比
+python3 tools/bag_metrics.py bags/base_2p8 bags/plan_inf035
+```
+
+**过程中踩到的两个坑**：
+
+1. **启动顺序错了，Nav2 会"假装启动"然后卡死**：没有传感器数据时启动，`controller_server`
+   会卡在 `local_costmap.activate()` 的 `waitForTransform` 循环里，连 `ros2 lifecycle get`
+   都不返回；后续的 `planner_server` 等全部停在 `inactive`。
+   必须**先让 `/scan`、`/odom` 流动起来，再启动 Nav2**。
+2. **AMCL 的 TF 是"激光驱动"的**：只发 `/initialpose`、没有 `/scan` 时，AMCL 不会发布
+   `map → odom`。改用 `amcl.set_initial_pose: true` + `initial_pose: {x,y,z,yaw}` 后，
+   AMCL 激活即采用固定位姿，收到第一帧扫描就发 TF，省掉了"趁启动时手发初始位姿"的时序操作。
+
 ## 项目结构
 
 ```text
@@ -375,7 +461,8 @@ ros2/
 │       │   └── my_world.world        # 仿真场景：地面 + 方块 / 圆柱 / 墙
 │       ├── config/
 │       │   ├── slam_toolbox.yaml     # SLAM 参数
-│       │   └── nav2_params.yaml      # Nav2 参数（已按 0.4×0.3 m 小车调整）
+│       │   ├── nav2_params.yaml      # Nav2 参数（已按 0.4×0.3 m 小车调整）
+│       │   └── nav2_params.baseline.yaml  # 调参实验的基线备份
 │       ├── rviz/
 │       │   └── view.rviz             # 预配置的 RViz 布局
 │       ├── CMakeLists.txt
@@ -383,6 +470,8 @@ ros2/
 │
 ├── bags/                             # rosbag2 录制数据（已 gitignore，不入库）
 ├── maps/                             # SLAM 产出的地图（.pgm + .yaml，体积小可入库）
+├── tools/
+│   └── bag_metrics.py                # 读 bag 输出导航指标（路径长度 / 速度 / 障碍距离）
 ├── DEFAULT_FASTDDS_PROFILES.xml      # Fast DDS 自定义 profile（data_sharing 配置）
 ├── .gitignore
 └── README.md
@@ -856,6 +945,10 @@ pgrep -a gzserver                           # 确认服务端还活着
   就不发 `map → odom`，进而所有代价地图超时」这条因果链。
 - 学会用「串联」而不是「抢占」组织速度指令链路：`/cmd_vel → watchdog → /cmd_vel_safe → 底盘`，
   把安全层放在所有指令的必经之路上。
+- 掌握参数调优的科学方法：**固定输入、单变量、量化指标**；并理解离线回放的「开环」特性
+  决定了能观测什么、不能观测什么。
+- 能解读 Nav2 参数的实际影响：`inflation_radius` 从 0.55 降到 0.35，绕障路径缩短
+  0.33 m（−8.8%）；而目标点若不在障碍附近，同一参数改动只带来 1.6 cm 差异。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -872,7 +965,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] rosbag2 录制与离线回放
 - [x] SLAM 建图（slam_toolbox）
 - [x] Nav2 导航框架实践（地图 + AMCL + 全局规划 + 局部控制）
-- [ ] Nav2 参数调优（代价地图膨胀半径、控制器参数、恢复行为）
+- [x] Nav2 参数调优：离线实验方法 + `inflation_radius` 对比实验
 - [ ] IMU 传感器仿真与融合
 - [ ] rclpy 节点、单元测试、组件容器化部署
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
@@ -916,6 +1009,8 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **插件参数带命名空间** | `ros2 param get /controller_server max_vel_x` 报 `Parameter not set` | 它挂在 `FollowPath:` 插件下，正确读法是 `ros2 param get /controller_server FollowPath.max_vel_x` |
 | **`ros2 topic info -v` 的 `Node name` 混合了发布者与订阅者** | 误以为某节点在「抢」话题 | 只看 `Publisher count` / `Subscription count`；查单个节点用 `ros2 node info <节点名>` |
 | **多个发布者抢同一个 `/cmd_vel`** | 车一顿一顿、或干脆不动 | 用串联架构：`/cmd_vel → watchdog → /cmd_vel_safe → 底盘`，让底盘只监听一个话题 |
+| **插件参数必须写在插件段里** | 改了 `inflation_radius` 但路径毫无变化 | `inflation_radius` / `cost_scaling_factor` 属于 `inflation_layer` 插件，必须缩进在 `inflation_layer:` 之下；写在 `ros__parameters` 直属层会被**静默忽略**。验证用 `ros2 param get <节点> inflation_layer.inflation_radius` |
+| **离线回放是开环的** | 发了目标、`/cmd_vel` 全 0、车不动 | bag 里的 `/odom`、`/tf` 决定位姿，Nav2 的 `/cmd_vel` 无人消费。离线只能对比「决策」，不能对比「结果」 |
 
 ## 开发记录
 
@@ -923,7 +1018,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 |---|---|
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
-| **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节 |
+| **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异 |
 
 ## 说明
 
