@@ -10,7 +10,7 @@ public:
     {   
         timeout_sec_ = declare_parameter<double>("timeout_sec", 0.5);
         sub_ = create_subscription<geometry_msgs::msg::Twist>(
-            "cmd_vel_input", 10,
+            "cmd_vel", 10,
             [this](const geometry_msgs::msg::Twist::SharedPtr msg){
                 last_cmd_ = *msg;
 
@@ -21,14 +21,14 @@ public:
             }
         );
 
-        pub_ = create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
+        pub_ = create_publisher<geometry_msgs::msg::Twist>("cmd_vel_safe", 10);
         timer_ = create_wall_timer(
             std::chrono::milliseconds(50),
             [this](){
                 tick();
             }
         );
-        RCLCPP_INFO(get_logger(), "cmd_vel_watchdog 节点已启动，等待 /cmd_vel_input");
+        RCLCPP_INFO(get_logger(), "cmd_vel_watchdog 已启动：/cmd_vel -> /cmd_vel_safe（超时 %.2f 秒）", timeout_sec_);
     }
 private:
     using Clock = std::chrono::steady_clock; 

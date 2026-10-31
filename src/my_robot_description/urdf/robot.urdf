@@ -356,6 +356,9 @@
 
   <gazebo>
     <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <ros>
+        <remapping>cmd_vel:=cmd_vel_safe</remapping>
+      </ros>
       <update_rate>50</update_rate>
 
       <num_wheel_pairs>1</num_wheel_pairs>
