@@ -382,6 +382,86 @@ python3 tools/bag_metrics.py bags/base_2p8 bags/plan_inf035
    `map → odom`。改用 `amcl.set_initial_pose: true` + `initial_pose: {x,y,z,yaw}` 后，
    AMCL 激活即采用固定位姿，收到第一帧扫描就发 TF，省掉了"趁启动时手发初始位姿"的时序操作。
 
+### 21. 在线控制参数调优与任务级编排
+
+#### 速度链路上的两级限幅
+
+Nav2 的速度指令要经过两道闸才到 `/cmd_vel`：
+
+```
+controller_server (FollowPath.max_vel_x)   ← 控制器「想发」多少
+        ↓ /cmd_vel_nav
+velocity_smoother (max_velocity)           ← 真正「允许」多少
+        ↓ /cmd_vel
+cmd_vel_watchdog → /cmd_vel_safe → 差速插件
+```
+
+**只改上游不改下游，速度会被静默削掉。** 实测：`max_vel_x: 0.30` 而
+`max_velocity: [0.26, 0, 1.0]` 时，`/cmd_vel` 最大只有 **0.260**。
+
+#### 实验二：控制参数对导航时长的影响（在线，目标点 (1.5, -1.2)，直线 1.92 m）
+
+| 组 | `max_vel_x` | `max_vel_theta` | `smoother.max_velocity` | `\|v\|` 最大 | 运动时长 | 原地转占比 |
+|---|---|---|---|---|---|---|
+| A | 0.15 | 1.0 | [0.26, 0, 1.0] | 0.150 | 20.6 s | 11.2% |
+| B | 0.30 | 1.0 | [0.26, 0, 1.0] | **0.260** | 17.8 s | 23.0% |
+| C | 0.30 | 1.5 | **[0.30, 0, 1.5]** | **0.300** | **15.4 s** | 21.0% |
+
+**三条结论**：
+
+1. **B 组暴露了限幅层**：`max_vel_x` 提到 0.30，实测只到 0.260 —— `velocity_smoother` 是瓶颈。
+2. **C 组放开限幅**：`|v|` 到 0.300，运动时长 20.6 s → **15.4 s（−25%）**。
+   但只放开 controller、不放 `velocity_smoother` 时（B 组）只快了 13.6% —— **改参数要沿整条链路检查**。
+3. **原地转占比降不下来**（21%）：说明「停下转向」不是速度上限问题，而是 **DWB 的策略选择**
+   （`PathAlignCritic` 权重较高，倾向先对准再前进）。要改得调 critic 权重，不是调速度上限。
+
+#### 实验三：waypoint 多点巡航（任务级编排）
+
+用 `FollowWaypoints`（`nav2_msgs/action`）一次下发 5 个航点，绕场一周回起点：
+
+```bash
+ros2 action send_goal /follow_waypoints nav2_msgs/action/FollowWaypoints "{
+  poses: [
+    {header: {frame_id: map}, pose: {position: {x:  1.5, y: -1.2, z: 0.0}, orientation: {w: 1.0}}},
+    {header: {frame_id: map}, pose: {position: {x:  1.5, y:  1.2, z: 0.0}, orientation: {w: 1.0}}},
+    {header: {frame_id: map}, pose: {position: {x: -1.0, y:  1.2, z: 0.0}, orientation: {w: 1.0}}},
+    {header: {frame_id: map}, pose: {position: {x: -1.0, y: -1.2, z: 0.0}, orientation: {w: 1.0}}},
+    {header: {frame_id: map}, pose: {position: {x:  0.0, y:  0.0, z: 0.0}, orientation: {w: 1.0}}}
+  ]
+}" --feedback
+```
+
+实测结果：
+
+| 指标 | 值 |
+|---|---|
+| 航点 | 5 个全部到达（`missed_waypoints: []`） |
+| 规划直线总长 | 10.78 m |
+| **实际行驶轨迹** | **11.07 m（+2.7%）** |
+| 运动时长 | 84.1 s |
+| `\|v\|` 平均 / 最大 | 0.159 / **0.300** |
+| `\|w\|` 最大 | **1.500**（= 参数上限，也用满了） |
+| 原地转占比 | **33.7%**（5 次到点对准方向） |
+| 全局路径条数 | 81（持续重规划） |
+
+**可解读的三点**：
+
+- 实际轨迹 11.07 m vs 规划 10.78 m，只多 2.7% —— 路径追踪精度不错。
+- 平均有效速度 = 11.07 ÷ 84.1 = **0.132 m/s**，明显低于 `|v|` 平均 0.159 ——
+  **差的就是原地转的时间**（占 33.7%）。
+- 所以**多点巡航的效率瓶颈不在直线速度，而在每个航点的转向对准**。
+
+#### 度量工具的两个坑（已修正）
+
+1. **「时长」要按运动时间算，不是录制窗口**：`/cmd_vel` 采样数 ÷ 20 Hz 才是真正的运动时长；
+   首末消息差包含了「开录过早 / 到点后未及时停录」的空闲时间。
+2. **累计型指标必须归一化**：相邻速度差之和要除以采样数，否则采样多的 bag 天然显得更「抖」
+   —— 未归一化时 Run A 的 1.12 反而比 Run B 的 0.40「差」，归一化后（0.0027 vs 0.0011）才可比。
+
+对应改动已落在 `tools/bag_metrics.py`：新增 `时长`、`真停占比`、`原地转占比`、`抖动/样本`。
+
+> **涉及文件**：`tools/bag_metrics.py`、`src/my_robot_description/config/nav2_params.yaml`
+
 ## 项目结构
 
 ```text
@@ -949,6 +1029,10 @@ pgrep -a gzserver                           # 确认服务端还活着
   决定了能观测什么、不能观测什么。
 - 能解读 Nav2 参数的实际影响：`inflation_radius` 从 0.55 降到 0.35，绕障路径缩短
   0.33 m（−8.8%）；而目标点若不在障碍附近，同一参数改动只带来 1.6 cm 差异。
+- 理解 Nav2 速度链路的**分级限幅**：controller 想发 0.30，`velocity_smoother` 只放 0.26，
+  下游不改则上游改动被静默吞掉；两处同时放开后导航时长才从 20.6 s 降到 15.4 s（−25%）。
+- 能用 `FollowWaypoints` 做任务级编排：5 航点巡航 11.07 m、追踪误差仅 2.7%，
+  并识别出「多点任务效率瓶颈在转向对准（33.7% 时间在原地转），而非直线速度」。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -966,6 +1050,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] SLAM 建图（slam_toolbox）
 - [x] Nav2 导航框架实践（地图 + AMCL + 全局规划 + 局部控制）
 - [x] Nav2 参数调优：离线实验方法 + `inflation_radius` 对比实验
+- [x] 控制参数调优（controller / `velocity_smoother` 两级限幅）与 `FollowWaypoints` 多点巡航
 - [ ] IMU 传感器仿真与融合
 - [ ] rclpy 节点、单元测试、组件容器化部署
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
@@ -1011,6 +1096,8 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **多个发布者抢同一个 `/cmd_vel`** | 车一顿一顿、或干脆不动 | 用串联架构：`/cmd_vel → watchdog → /cmd_vel_safe → 底盘`，让底盘只监听一个话题 |
 | **插件参数必须写在插件段里** | 改了 `inflation_radius` 但路径毫无变化 | `inflation_radius` / `cost_scaling_factor` 属于 `inflation_layer` 插件，必须缩进在 `inflation_layer:` 之下；写在 `ros__parameters` 直属层会被**静默忽略**。验证用 `ros2 param get <节点> inflation_layer.inflation_radius` |
 | **离线回放是开环的** | 发了目标、`/cmd_vel` 全 0、车不动 | bag 里的 `/odom`、`/tf` 决定位姿，Nav2 的 `/cmd_vel` 无人消费。离线只能对比「决策」，不能对比「结果」 |
+| **速度被 `velocity_smoother` 静默限幅** | `max_vel_x` 设 0.30，`/cmd_vel` 最大只有 0.26 | `velocity_smoother.max_velocity` 是链路上最后一道闸；改 controller 参数必须同步放开它，否则白改 |
+| **累计型指标不归一化会得出相反结论** | 抖动 1.12 的 bag 比抖动 0.40 的更差？ | 相邻速度差之和要除以采样数；不归一化时长 bag 天然显得更差 |
 
 ## 开发记录
 
@@ -1018,7 +1105,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 |---|---|
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
-| **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异 |
+| **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
 
 ## 说明
 
