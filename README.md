@@ -243,6 +243,24 @@
 
 > **涉及目录**：`bags/`（录制数据，已在 `.gitignore` 中排除，不入库）
 
+### 18. SLAM 建图（slam_toolbox）
+
+- 用 `slam_toolbox` 跑通「激光扫描 + 里程计 → 栅格地图」的完整链路：
+  实时开车用 `online_async_launch.py`（异步、不阻塞），喂 bag 用 `online_sync_launch.py`。
+- SLAM 在 TF 树里**只负责发布一段 `map → odom`**：通过扫描匹配估计机器人在 `map` 中的位姿，
+  再把 `odom` 的累积漂移补偿掉。另外两段由别人提供 ——
+  `odom → base_footprint`（差速插件）、`base_footprint → base_link → lidar_link`（robot_state_publisher）。
+- 关键参数：`base_frame: base_footprint`、`scan_topic: /scan`、`resolution: 0.05`、
+  `minimum_travel_distance / heading`（走多远、转多少插一个节点，仿真小车调到 0.2）、
+  `map_update_interval`（地图刷新周期）、`min/max_laser_range`（与 URDF 量程一致）。
+- 建图必须**真的移动**：原地不动只有一帧扫描，地图长不出来；
+  绕一圈回到起点会触发**闭环检测（loop closure）**，能看到地图自动对齐修正。
+- 成果 `maps/my_map.pgm` + `my_map.yaml`：110×81 px @ 0.05 m/px = **5.5 m × 4.05 m**，
+  空闲 76.9% / 障碍 2.4% / 未知 20.7%，`origin` 与 world 中障碍物位置吻合。
+
+> **涉及文件**：`src/my_robot_description/config/slam_toolbox.yaml`、
+> `maps/my_map.pgm`、`maps/my_map.yaml`
+
 ## 项目结构
 
 ```text
@@ -320,12 +338,15 @@ ros2/
 │       │   └── gazebo.launch.py      # 启动 Gazebo + 生成模型 + 看门狗
 │       ├── worlds/
 │       │   └── my_world.world        # 仿真场景：地面 + 方块 / 圆柱 / 墙
+│       ├── config/
+│       │   └── slam_toolbox.yaml     # SLAM 参数
 │       ├── rviz/
 │       │   └── view.rviz             # 预配置的 RViz 布局
 │       ├── CMakeLists.txt
 │       └── package.xml
 │
 ├── bags/                             # rosbag2 录制数据（已 gitignore，不入库）
+├── maps/                             # SLAM 产出的地图（.pgm + .yaml，体积小可入库）
 ├── DEFAULT_FASTDDS_PROFILES.xml      # Fast DDS 自定义 profile（data_sharing 配置）
 ├── .gitignore
 └── README.md
@@ -596,6 +617,33 @@ ros2 bag play bags/drive_01 --clock 1000 --topics /scan /tf
 > 录制结束务必用 **Ctrl+C 正常退出**，否则 `metadata.yaml` 写不完整，
 > 之后需要 `ros2 bag reindex` 修复。
 
+### 8. SLAM 建图
+
+```bash
+# 终端一：Gazebo 仿真（建图时建议关掉 GUI，见「调试经验」）
+ros2 launch my_robot_description gazebo.launch.py
+
+# 终端二：SLAM（实时场景用 online_async）
+ros2 launch slam_toolbox online_async_launch.py \
+  slam_params_file:=$HOME/ros2/src/my_robot_description/config/slam_toolbox.yaml
+
+# 终端三：RViz，用 slam_toolbox 自带布局，Fixed Frame 设为 map
+ros2 run rviz2 rviz2 \
+  -d $(ros2 pkg prefix slam_toolbox)/share/slam_toolbox/config/slam_toolbox_default.rviz \
+  --ros-args -p use_sim_time:=true
+
+# 终端四：开车绕一圈（建图必须移动）
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=cmd_vel_input
+
+# 建好之后保存（趁 slam_toolbox 还在运行）
+ros2 run nav2_map_server map_saver_cli -f maps/my_map
+```
+
+三个要点：
+- RViz 的 **Fixed Frame 必须设为 `map`**，否则地图不显示
+- **保存要趁 SLAM 节点还在跑** —— 地图只存在于它的内存里，Ctrl+C 之后就没了
+- **建图靠「走」** —— 原地不动永远只有一帧
+
 ## 实践与技术收获
 
 通过这些示例，对 ROS 2 的开发流程和底层机制进行了实践，主要包括：
@@ -622,6 +670,10 @@ ros2 bag play bags/drive_01 --clock 1000 --topics /scan /tf
 - 掌握 rosbag2 的录制与回放，理解各话题的数据量量级（`/tf` 高频、图像极大），
   以及 `--clock` 对离线回放的必要性。
 - 建立"数据与算法解耦"的调试方式：一次录制、反复回放，保证算法输入的完全可复现。
+- 掌握 SLAM 建图的完整链路：TF 三段的分工（`map→odom` / `odom→base_link` / 静态 TF）、
+  扫描匹配与闭环检测，以及「建图必须移动」这一前提。
+- 建立起一套可靠的观测方法：TF 用 `view_frames` 而不是 `echo`、仿真环境统一 `use_sim_time`、
+  先看系统负载再判断「话题没数据」。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -636,9 +688,39 @@ ros2 bag play bags/drive_01 --clock 1000 --topics /scan /tf
 - [x] 参数持久化（YAML + launch 加载）
 - [ ] IMU 传感器仿真
 - [x] rosbag2 录制与离线回放
-- [ ] SLAM 建图（slam_toolbox）
+- [x] SLAM 建图（slam_toolbox）
 - [ ] Nav2 导航框架实践
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
+
+## 调试经验（踩坑记录）
+
+调试仿真 + SLAM 过程中踩过的坑。共同特征是：**不报错，但结果全错**，都是一点点排出来的。
+
+### TF 相关
+
+| 坑 | 现象 | 原因 / 做法 |
+|---|---|---|
+| **`tf2_echo` 在仿真里必须加 `use_sim_time`** | 报 `frame does not exist`（明明有） | `tf2_echo` 默认按**系统时间**查，而 TF 是**仿真时间**戳。必须 `--ros-args -p use_sim_time:=true` |
+| **`ros2 bag play -l` 会破坏 tf2** | `TF_OLD_DATA ignoring data from the past` 刷屏，SLAM 完全不工作 | tf2 要求时间戳单调递增，循环回放每圈都让时间倒退。**依赖 TF 的管道绝不能循环回放** |
+| **bag 回放时 `/tf_static` 不可靠** | SLAM 报算不出雷达位姿，地图一直空白 | `/tf_static` 依赖 latched 语义，而 `ros2 bag play` 只当普通消息播一次。回放时应额外运行 `robot_state_publisher` 提供真正的静态 TF |
+| **用 `ros2 topic echo` 判断 latched 话题空不空不可靠** | 明明有数据却读不出来 | 高负载/超时下容易假阴性。用 `ros2 run tf2_tools view_frames` 更稳 |
+
+### 日志与观测
+
+| 坑 | 现象 | 原因 / 做法 |
+|---|---|---|
+| **`output='screen'` 让节点日志不进 `launch.log`** | 事后去 `~/.ros/log/` 找不到节点输出 | 日志直接打到终端。调试期改成 `output='both'` |
+| **高负载下 `ros2 topic hz` / `echo` 会假阴性** | 显示话题没发布，其实有 | 先 `uptime` 看 load —— 4 核跑 Gazebo GUI + RViz + SLAM 已饱和 |
+| **Gazebo GUI 白占一半 CPU** | 仿真 RTF 只有 0.15，`/clock` 只有 10 Hz | 调算法时 `pkill gzclient`，只留 `gzserver`，可视化交给 RViz |
+
+### 命令行
+
+| 坑 | 现象 | 原因 / 做法 |
+|---|---|---|
+| **`--ros-args` 是分界线** | `UnknownROSArgsError` | 程序自身参数（如 `rviz2 -d`）必须在 `--ros-args` **之前**；ROS 参数（`-p` / `-r`）在**之后** |
+| **`ros2 bag record -o` 要目录名** | 路径变成 `xxx.db3/xxx.db3_0.db3` | `-o` 是输出目录，不要自己加 `.db3` |
+| **录制必须 Ctrl+C 正常退出** | `metadata.yaml` 缺失，bag 打不开 | 异常退出后用 `ros2 bag reindex` 修复 |
+| **改 URDF 后必须 `colcon build`** | 改了没生效 | launch 读的是 `install/` 里的副本，不是 `src/` 原文件 |
 
 ## 开发记录
 
@@ -649,6 +731,7 @@ ros2 bag play bags/drive_01 --clock 1000 --topics /scan /tf
 | **2026-10-31 上午** | 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件 |
 | **2026-10-31 下午** | 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载） |
 | **2026-10-31 傍晚** | rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/` |
+| **2026-10-31 晚** | SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑 |
 
 ## 说明
 
