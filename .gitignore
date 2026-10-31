@@ -9,6 +9,9 @@ my_topic_bag/
 *.db3
 *.mcap
 
+# rosbag2 录制数据（体积大，只本地保留）
+bags/
+
 # tf2 view_frames 生成的图（需要版本化时删掉这两行）
 frames_*.gv
 frames_*.pdf
