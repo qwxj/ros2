@@ -754,6 +754,8 @@ Gazebo /imu（准）  ───────────────────�
 | **`status: 4` 是成功，不是放弃** | 把 `4` 当 ABORTED，白排查一整轮 | `STATUS_SUCCEEDED = 4`、`STATUS_CANCELED = 5`、`STATUS_ABORTED = 6`。**先查枚举再解读现象** |
 | **`isTaskComplete()` 会在回调里二次 spin** | 定时器里调它，结果检查永远不触发 | 它内部调 `spin_until_future_complete`。在回调/定时器里改用 `self.result_future.done()` |
 | **视觉目标必须落在视野锥内且无遮挡** | 检测器一条不发，任务节点干等 | 相机水平 FOV 60° → 只有 ±30°。放目标前用 `/scan` 确认正前方最近距离就是它 |
+| **用被测函数算期望值 → 测试永远绿** | 测试全过，但函数返回 `(999,999)` 也不会红 | 期望值必须来自被测代码之外：手算、数学约束、几何常识、解析解、往返自洽 |
+| **拿集成测试当单元测试用** | 60 秒一次，红了只知道"车没动" | 把数学抽成纯函数，0.14 秒筛一遍；集成测试只负责验证"接线" |
 
 > **可信判据 = 数据体检三条**：三个话题 Hz 符合预期（50 / 100 / 10）、
 > `Publisher count` 为 1、自洽性误差在几度以内。三条都满足，结论才可信。
@@ -1086,6 +1088,138 @@ STATUS_ABORTED   = 6      # ← 6 才是放弃
 > **涉及文件**：`src/my_robot_tasks/my_robot_tasks/red_target_detector.py`、
 > `src/my_robot_tasks/my_robot_tasks/go_to_target.py`
 
+### 28. 单元测试：把设计契约定成断言
+
+#### 起点：原来的代码根本没法测
+
+`red_target_detector.py` 里的投影函数长这样：
+
+```python
+def project_to_ground(self, u, v, stamp):
+    tf = self.tf_buffer.lookup_transform(...)   # 需要 ROS 节点 + TF
+    self.get_logger().warn(...)                 # 需要 ROS 日志
+```
+
+**纯几何计算和 ROS 基础设施耦合** —— 想测「像素 → 地面」就得起 Gazebo、起 Nav2、等 TF。
+那不是单元测试，是集成测试（60~90 秒一次，出错还定位不了）。
+
+#### 第一步：可测性驱动设计
+
+把数学从节点里拆出来，得到 `geometry.py`（**零 ROS 依赖**）：
+
+```python
+R_OPTICAL_TO_LINK                                    # 常量矩阵
+quat_xyzw_to_matrix(x, y, z, w)      -> 3x3           # 收 4 个 float，不收 ROS 对象
+pixel_to_ray(u, v, K)                -> 单位向量
+optical_to_world(d_opt, R)           -> 世界系方向
+intersect_ground(origin, direction)  -> (x, y) | None
+```
+
+**每个函数就是一个「契约」。测试 = 把契约定成断言。**
+
+> `quat_xyzw_to_matrix` 故意收 4 个 float 而不是 ROS 的 `Quaternion` 对象 —— 就是为了能在测试里随手造数据。
+
+#### 第二步：对每个函数问三个问题
+
+| 问题 | 对应的测试类型 |
+|---|---|
+| **它承诺了什么？** | 正常路径测试 |
+| **有没有「不跑代码就知道答案」的例子？** | 已知答案测试 |
+| **哪些输入必须被拒绝？** | 异常路径测试 |
+
+按这个框架填满 13 个测试：
+
+| 被测函数 | 正常路径 | 已知答案 | 异常路径 |
+|---|---|---|---|
+| `R_OPTICAL_TO_LINK` | 三个轴的映射 | 手算 `(0,-1,0)` / `(0,0,-1)` / `(1,0,0)` | **必须是真旋转**（正交 + det=+1） |
+| `quat_xyzw_to_matrix` | 单位元 | `(0,0,0,1)` → 恒等矩阵 | yaw=90° → 解析解 |
+| `pixel_to_ray` | 主点 → `(0,0,1)` | 模长必须为 1 | 右侧像素 → x>0 |
+| `intersect_ground` | 正下方 → 原点 | 45° → 水平位移 = 相机高度 | **朝上 / 平行 → None** |
+
+其中这条断言直接对应 §27 踩过的 bug：
+
+```python
+def test_intersect_upward_returns_none():
+    assert intersect_ground([0, 0, 0.08], [0, 0, 1]) is None
+    assert intersect_ground([0, 0, 0.08], [0.5, 0.0, 0.5]) is None
+```
+
+> 投箱子重心时射线朝上，与地面永不相交 → 静默返回 None。**以后谁改坏了，这条立刻变红。**
+
+#### 第三步（灵魂）：期望值必须来自被测代码之外
+
+**错误做法** —— 用被测函数算期望值：
+
+```python
+expected = intersect_ground([0, 0, 0.08], [0, 0, -1])          # ← 用答案验证答案
+assert intersect_ground([0, 0, 0.08], [0, 0, -1]) == expected
+```
+
+**这个测试永远绿，哪怕函数返回 `(999, 999)`。**
+
+本项目用了 **5 种独立的期望值来源**：
+
+| 来源 | 例子 | 为什么可信 |
+|---|---|---|
+| **① 手算** | `R_OPTICAL_TO_LINK @ (1,0,0) == (0,-1,0)` | 图像向右 → 车体 −Y，这是坐标定义 |
+| **② 数学/物理约束** | `‖d‖ == 1`、`det(R) == +1`、`R·Rᵀ == I` | 旋转矩阵的定义，与实现无关 |
+| **③ 几何常识** | 45° 斜射 → 水平位移 = 相机高度 | 等腰直角三角形 |
+| **④ 教科书解析解** | 主点 `(cx,cy)` → 射线 `(0,0,1)` | 针孔相机模型的定义 |
+| **⑤ 双向自洽（roundtrip）** | 地面点 → 像素 → 地面点 | **不需要知道中间答案** |
+
+#### 第五种最巧妙：往返测试
+
+```python
+target = (1.0, -0.5)                       # 已知地面点
+# 反算：地面点 → 像素 → 正投影回地面
+assert p == pytest.approx((1.0, -0.5), abs=1e-9)
+```
+
+**只需要一个约束：正向变换和反向变换必须互为逆运算。**
+
+这是 **oracle problem 的经典解法**：当你不知道正确答案时，去找一个不需要正确答案的约束。
+
+一次往返就能同时抓住：`K` 用错、光学旋转矩阵写错、四元数公式错、漏归一化、求交公式错 ——
+**任何一环错，往返都不闭合。** 它是 13 个测试里最「贵」的一个（也包含了一个 yaw=30° 的版本）。
+
+#### 集成测试 vs 单元测试的分工
+
+| | 集成测试（跑仿真） | 单元测试（pytest） |
+|---|---|---|
+| 耗时 | 60~90 秒 | **0.14 秒** |
+| 需要什么 | Gazebo + Nav2 + 红箱子 + 正确视角 | 只要 Python |
+| 出错能定位吗 | ❌「车没动」—— 20 个可能原因 | ✅ 直接指出是哪个函数 |
+| 能造边界输入吗 | ❌ 很难造「射线朝上」 | ✅ 一行代码 |
+
+```
+单元测试  →  保证「数学是对的」     ← 错了整个系统必错
+集成测试  →  保证「接线是对的」     ← 跑一次就能看出来
+```
+
+#### 验证测试真的有效：变异测试（故意改坏）
+
+只看「通过」不会让人相信测试，**只有见过它变红才会**：
+
+| 故意改坏的地方 | 应该变红的测试 |
+|---|---|
+| `R_OPTICAL_TO_LINK` 加个 `.T`（转置） | `test_optical_to_link_axes`、`test_full_roundtrip`、`test_roundtrip_with_yaw` |
+| `pixel_to_ray` 删掉 `/ norm(d)` | `test_pixel_ray_is_unit_length` |
+| `intersect_ground` 注释掉 `direction[2] >= 0 → None` | `test_intersect_upward_returns_none` |
+
+#### 可测代码的四个特征
+
+| 特征 | 反例 | 正例 |
+|---|---|---|
+| **纯函数**（同样输入永远同样输出） | 读全局变量、读时钟 | 参数传进来 |
+| **无副作用** | 函数里发 ROS 消息 | 只 `return` |
+| **依赖注入** | 内部自己建节点 | 需要的东西当参数传 |
+| **单一职责** | 一个函数既查 TF 又算数学又发消息 | 拆三个函数 |
+
+`geometry.py` 四条全满足，所以能 0.14 秒测完。
+
+> **涉及文件**：`src/my_robot_tasks/my_robot_tasks/geometry.py`、
+> `src/my_robot_tasks/test/test_projection.py`
+
 ## 项目结构
 
 ```text
@@ -1161,8 +1295,11 @@ ros2/
 │   │   │   ├── cmd_vel_repeater.py   # 一次性指令 → 持续指令流（rclpy 发布练习，链路上不启用）
 │   │   │   ├── patrol.py             # BasicNavigator 巡逻任务脚本
 │   │   │   ├── odom_noise.py         # 给 /odom 注入角速度偏差，产出 /odom_noisy（融合实验用）
+│   │   │   ├── geometry.py           # 纯几何计算（零 ROS 依赖，可被 pytest 直接测）
 │   │   │   ├── red_target_detector.py # 红块检测 → 像素反投影到 map 坐标
 │   │   │   └── go_to_target.py       # 订阅 /detected_target，回退 standoff 后导航过去
+│   │   ├── test/
+│   │   │   └── test_projection.py    # 13 个几何单元测试（0.14 秒跑完）
 │   │   └── setup.py                  # entry_points 声明可执行脚本
 │   └── my_robot_description/         # 机器人描述、仿真与可视化
 │       ├── urdf/
@@ -1639,6 +1776,23 @@ ros2 run my_robot_tasks go_to_target --ros-args -p standoff:=0.80
 > **关键参数**：`standoff` 必须 ≥ 0.70（否则目标落在膨胀区）；
 > 红箱子必须在相机 ±30° 视野锥内且无遮挡。
 
+### 14. 单元测试
+
+纯 Python 测试，**不需要 Gazebo / Nav2**：
+
+```bash
+cd ~/ros2/src/my_robot_tasks
+python3 -m pytest test/test_projection.py -v
+```
+
+期望：`13 passed in 0.14s`。
+
+> `test/` 下另有三个 colcon 模板测试（`test_copyright` / `test_flake8` / `test_pep257`），
+> 是代码风格与版权头检查，目前未通过 —— 先只跑 `test_projection.py`。
+
+**验证测试真有效的方法**（变异测试）：临时把 `geometry.py` 里的
+`R_OPTICAL_TO_LINK` 加个 `.T`，重跑应当有 3 条变红。
+
 ## 环境准备与常用命令
 
 命令速查，避免每次重新翻找。
@@ -1812,6 +1966,11 @@ pgrep -a gzserver                           # 确认服务端还活着
 - 学会把「视觉目标的物理属性」和「导航可达性」联系起来：物体表面落在代价地图的致命
   膨胀区里，必须用 `standoff` 回退；且 `standoff` 要随检测距离自适应，否则目标会落在
   车旁边导致 `xy_goal_tolerance` 立即判成功、车一动不动。
+- 掌握**可测性驱动设计**：把纯计算从 ROS 节点里拆成零依赖模块（`geometry.py`），
+  才能用 0.14 秒的单元测试替代 60 秒的仿真集成测试。
+- 掌握单元测试的**期望值来源**：手算、数学约束（正交 / 模长 / det）、几何常识、
+  教科书解析解、以及**往返自洽**（不需要知道正确答案的 oracle）。
+- 理解**变异测试**的价值：只看到绿灯不会相信测试，故意改坏代码看它变红才会。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -1838,7 +1997,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [ ] 单元测试（gtest / pytest）与组件容器化部署
 - [ ] 平滑器（`smoother_server`）与恢复行为（`behavior_server`）实操
 - [x] 相机进入导航链路：红块检测 → 像素反投影到 map → Nav2 导航（实测投影误差 2~3 cm）
-- [ ] 单元测试（`pytest` 覆盖检测阈值与投影公式）
+- [x] 单元测试：抽出 `geometry.py`（零 ROS 依赖）+ 13 个 pytest 用例，0.14 秒跑完
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
 
 ## 调试经验（踩坑记录）
@@ -1901,7 +2060,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
-| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑭ 视觉目标导航：`red_target_detector`（红块→像素反投影→map 坐标，投影误差 2~3 cm）+ `go_to_target`（多帧收敛 + 自适应 standoff + BasicNavigator）；实测车 (0,0)→(0.31,-0.04)、距目标 0.209 m < 容差 0.25、`status=4 SUCCEEDED`；修掉 `isTaskComplete()` 在回调里二次 spin、`use_sim_time` 未开、目标落入膨胀区三个问题 |<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
+| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑭ 视觉目标导航：`red_target_detector`（红块→像素反投影→map 坐标，投影误差 2~3 cm）+ `go_to_target`（多帧收敛 + 自适应 standoff + BasicNavigator）；实测车 (0,0)→(0.31,-0.04)、距目标 0.209 m < 容差 0.25、`status=4 SUCCEEDED`；修掉 `isTaskComplete()` 在回调里二次 spin、`use_sim_time` 未开、目标落入膨胀区三个问题<br>⑮ 单元测试：把纯几何计算从 ROS 节点抽成 `geometry.py`，写 13 个 pytest 用例（光学系→车体旋转、四元数、像素反投影、地面求交、双向往返），0.14 秒全部通过；建立「期望值必须来自被测代码之外」的 5 类来源与变异测试验证法 |<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
 
 ## 说明
 
