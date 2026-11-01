@@ -1,0 +1,39 @@
+# 第 2 级 EKF：在 map 系内融合 AMCL 位姿 + ekf_local 速度，接管 map -> odom
+ekf_global:
+  ros__parameters:
+    use_sim_time: true
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_footprint
+    world_frame: map               # 关键：在 map 系内融合
+    publish_tf: true               # 关键：接管 map -> odom（amcl 的 tf_broadcast 已关）
+
+    publish_acceleration: false
+
+    # ---- 输入 1：AMCL 的 map 系绝对位姿 ----
+    # 注意：/amcl_pose 受 update_min_d / update_min_a 门控，车静止时不发。
+    # 所以这里只用它做「绝对修正」，静止时靠 odom0 的速度推算。
+    pose0: /amcl_pose
+    pose0_config: [true,  true,  false,    # x, y, z
+                   false, false, true,     # roll, pitch, yaw
+                   false, false, false,    # vx, vy, vz
+                   false, false, false,    # vroll, vpitch, vyaw
+                   false, false, false]    # ax, ay, az
+    pose0_differential: false
+    pose0_relative: false
+    pose0_queue_size: 10
+
+    # ---- 输入 2：ekf_local 的输出，只取速度（位置全 false，避免和 pose0 冲突）----
+    odom0: /odometry/local
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,    # vx
+                   false, false, true,     # vyaw
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10

@@ -15,6 +15,7 @@ from launch.actions import (
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -78,6 +79,35 @@ def generate_launch_description():
         }.items(),
     )
 
+    # ============================================================
+    # 阶段 3：ekf_global（第 2 级 EKF，接管 map -> odom）
+    # 必须在 AMCL 激活并发出第一帧 /amcl_pose 之后启动，
+    # 所以放在 22 秒（Nav2 约 15 秒起来，AMCL 约 16 秒首次更新）。
+    # ============================================================
+    # 关键：AMCL 的 /amcl_pose 受 update_min_d / update_min_a 门控，
+    # 车静止时不发。而 ekf_global 需要一帧 map 系绝对位姿才能正确初始化
+    # map->odom，否则它只靠速度积分，map->odom 会偏出 1~2 m。
+    # /request_nomotion_update 强制 AMCL 立刻做一次更新并发布 /amcl_pose。
+    force_amcl_update = ExecuteProcess(
+        cmd=['bash', '-c', ' '.join([
+            'for i in 1 2 3; do',
+            '  ros2 service call /request_nomotion_update std_srvs/srv/Empty >/dev/null 2>&1;',
+            '  sleep 1;',
+            'done;',
+            'echo "[bringup] 已强制 AMCL 更新 3 次，给 ekf_global 提供初始位姿"',
+        ])],
+        output='screen',
+    )
+
+    ekf_global = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_global',
+        parameters=[os.path.join(pkg_share, 'config', 'ekf_global.yaml')],
+        remappings=[('odometry/filtered', '/odometry/global')],
+        output='screen',
+    )
+
     return LaunchDescription([
         # ★ 关键：禁用 Fast DDS 共享内存传输，只用 UDPv4。
         # 否则 /dev/shm 里的 fastrtps 段会抢 fastrtps_port74xx，
@@ -90,4 +120,6 @@ def generate_launch_description():
         TimerAction(period=5.0, actions=[gazebo]),
         # 保留 GUI 时 spawn 更慢，Nav2 延到 15 秒
         TimerAction(period=15.0, actions=[nav2]),
+        TimerAction(period=20.0, actions=[force_amcl_update]),
+        TimerAction(period=25.0, actions=[ekf_global]),
     ])

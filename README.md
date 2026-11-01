@@ -770,6 +770,9 @@ Gazebo /imu（准）  ───────────────────�
 | **`pkill -x` 对超过 15 字符的进程名无效** | `pkill -9 -x robot_state_publisher` 静默不杀任何进程，孤儿越积越多 | Linux `comm` 最多 15 字符（`robot_state_pub`）。**长名字一律用 `pkill -f "[r]obot_state_publisher"`** |
 | **`pkill -9` 强杀 launch 会留下孤儿进程** | 反复重启后 DDS 图里堆了 7 个 `robot_state_publisher`，导致「Nav2 节点全部查不到」的假象 | 强杀 launch 不触发它优雅清理子进程。**用 SIGINT（Ctrl+C），或事后按进程名补杀** |
 | **新进程 DDS 发现要 8~10 秒** | 启动 3 秒就查图，看到「`odom` 帧不存在」「节点为空」，误判系统坏了 | 查询前先等发现：轮询 `get_topic_names_and_types()` 直到看到关键话题 |
+| **`ekf_global` 启动时没有绝对位姿** | `map→odom` 偏出 1.89 m，全局代价地图全偏 | `/amcl_pose` 受 `update_min_d/a` 门控，车不动就不发。**启动前用 `/request_nomotion_update` 强制 AMCL 更新一次** |
+| **`collision_monitor` 的 STOP 是全向锁死** | 车撞到障碍后，**倒车也被拦**，彻底锁死只能重启 | `PolygonStop` 命中时把整条 `cmd_vel` 归零，不分方向。**实操上撞墙后不能靠倒车自救** |
+| **`grep` 对带 ANSI 颜色的日志报 "binary file matches"** | 看不到匹配内容 | 加 `-a`，或先 `sed 's/\x1b\[[0-9;]*m//g'` 去色 |
 
 > **可信判据 = 数据体检三条**：三个话题 Hz 符合预期（50 / 100 / 10）、
 > `Publisher count` 为 1、自洽性误差在几度以内。三条都满足，结论才可信。
@@ -1045,31 +1048,33 @@ for tag, tq in (('stamped', Time.from_msg(stamp) - Duration(seconds=0.02)),
 
 **结论：降分辨率没有破坏视觉链路，`min_area` / `r_min` / `color_diff` 全部不用调。**
 
-#### ⚠️ 一个真实的脆弱点：AMCL 的 `map→odom` 是事件驱动的
+#### AMCL 的两种输出：TF 连续，话题门控（一个被误判过的细节）
+
+测试时曾看到 `[WARN] 坐标系 "map" 不存在`，一度误判为「AMCL 的 `map→odom` 是事件驱动的」。**实测证明那个判断是错的** —— 当时环境里堆了孤儿进程，DDS 图被污染。
+
+在干净环境下实测（`update_min_d: 0.25` / `update_min_a: 0.2`）：
+
+| 输出 | 频率 | 是否受 `update_min_*` 门控 |
+|---|---|---|
+| **`map→odom` TF** | **恒定 10 Hz** | ❌ 不门控 —— 每帧激光都广播 |
+| **`/amcl_pose` 话题** | 只在**滤波更新**时发 | ✅ 门控 |
+
+实测数据：
 
 ```
-[WARN] 坐标系 "map" 不存在 —— 起来 Nav2/AMCL 了吗？
+静止 3 秒：      /amcl_pose   0 条
+前进 1.16 m：    /amcl_pose   3 条     ← 1.16/0.25 ≈ 4 次门控更新
+再静止 5 秒：    /amcl_pose   0 条
+map→odom TF：    恒定 10 Hz（静止/运动都一样）
 ```
 
-排查后确认不是没起 Nav2，而是 **AMCL 只在"车动够多"时才广播 `map→odom`**：
+**这个区分很重要**：
+- 需要 `map` 坐标系时（如视觉投影）—— **AMCL 一直在发 TF，不会缺帧**
+- 需要 `/amcl_pose` 时（如 `ekf_global` 的 `pose0`）—— **只有车动了才有数据**，
+  所以 `ekf_global` 的设计必须是「有修正时融合，静止时靠里程计推算」
 
-```yaml
-update_min_d: 0.25    # 走了 0.25 m 才更新一次
-update_min_a: 0.2     # 转了 0.2 rad 才更新一次
-```
-
-于是：
-
-```
-车静止 → AMCL 不更新 → 不发 map→odom
-       → 任何「新启动」的 TF 监听器永远收不到 map 帧（TF 不是 latched）
-       → red_target_detector(parent_frame=map) 直接失败
-       → go_to_target 无从开始
-```
-
-**这不是检测器的 bug，是 TF 责任链的设计问题** —— 一个"事件驱动"的变换无法被实时消费。
-**根治办法就是两级 EKF 的第 2 级**：让 `ekf_global` 接管 `map→odom`，
-变成**恒定频率的连续发布**（详见 §31）。这也是「为什么需要 `ekf_global`」最有力的理由。
+> **教训**：在 DDS 图不干净的环境里测出来的"规律"不可信。**下一次测到反常现象，
+> 先确认环境干净（`pgrep` 数一遍、节点列表里没有重复名字），再下结论。**
 
 #### `standoff`：目标必须退出代价地图的膨胀区
 
@@ -1577,6 +1582,138 @@ IncludeLaunchDescription(
 > `src/my_robot_description/launch/bringup_all.launch.py`、
 > `src/my_robot_description/worlds/my_world.world`、
 > `src/my_robot_description/urdf/robot.urdf`
+
+### 31. 两级 EKF：把两段 TF 都换成融合输出
+
+#### 结构
+
+```
+map ──[ekf_global 28 Hz]──▶ odom ──[ekf_local 30 Hz]──▶ base_footprint ──[rsp]──▶ 传感器
+        ↑                          ↑
+   /amcl_pose + /odometry/local   /odom + /imu
+```
+
+| 级 | 节点 | `world_frame` | 输入 | 输出 TF | 替换了谁 |
+|---|---|---|---|---|---|
+| 1 | `ekf_local` | `odom` | `/odom` + `/imu` | **`odom → base_footprint`** | Gazebo 差速插件 |
+| 2 | `ekf_global` | `map` | `/amcl_pose` + `/odometry/local` | **`map → odom`** | AMCL |
+
+两级的分工：**第 1 级处理"轮式打滑"，第 2 级处理"激光定位跳变"。**
+
+#### 第 ③ 步：单级融合到底有没有用？（反直觉的量化结论）
+
+实验设计：原地转 `0.6 rad/s × 11 s`（理论 378°，实际 337°），
+用 **Gazebo IMU 的 orientation 当真值**（EKF 只取 `vyaw`，不用 orientation，所以无循环依赖）。
+
+| 来源 | 累计转角 | 相对 IMU 真值误差 | 过程中最大偏差 |
+|---|---|---|---|
+| IMU（真值） | 337.34° | — | — |
+| **轮式 `/odom`** | 337.22° | **0.126°（0.037%）** | 0.631° |
+| **融合 `/odometry/local`** | 336.53° | **0.807°（0.239%）** | 1.687° |
+
+**融合反而更差 6.4 倍。**
+
+**原因**：轮式 yaw 由轮子转角**几何推算**，无滑移时几乎无误差；
+而融合掺入了 IMU 的 `vyaw`（角速度），**对角速度积分必然累积噪声与偏置** ——
+即使噪声只有 0.0002 rad/s，积分 11 秒也会累积出 0.8°。
+
+**结论（和 §25 / ⑫ 一致）**：
+> **融合的价值不在"正常情况更准"，而在"轮式失效时不崩"。**
+> 仿真里没有滑移 → 轮式已是最优估计，掺 IMU 是负收益；
+> 只有注入 10% 打滑后，融合才体现出价值（消除 **91%** 偏差，见 ⑫）。
+
+**这是一个诚实的负面结果，但它把"什么时候该用融合"说清楚了。**
+
+#### 第 ④ 步：`ekf_global` 接管 `map → odom`
+
+**配置要点**（`config/ekf_global.yaml`）：
+
+```yaml
+ekf_global:
+  ros__parameters:
+    world_frame: map          # 在 map 系内融合
+    publish_tf: true          # 接管 map -> odom
+    pose0: /amcl_pose         # 绝对位姿：只用 x, y, yaw
+    pose0_config: [true,true,false, false,false,true, ...]
+    odom0: /odometry/local    # 速度：只取 vx, vyaw（位置全 false，避免和 pose0 打架）
+    odom0_config: [false×6, true,false,false, false,false,true, false×3]
+```
+
+**同时必须关掉 AMCL 的 TF 广播**，否则两个节点抢同一段 TF：
+
+```yaml
+# nav2_params.yaml
+amcl:
+  tf_broadcast: false   # 交给 ekf_global 发 map->odom
+```
+
+#### ⚠️ 踩到的坑：`ekf_global` 没有初始参考位姿
+
+第一版实现后实测：
+
+```
+启动后  map->odom  y = -1.8896 m   ← 错了 1.89 m！
+移动后  map->odom  y = -0.0257 m   ← 车一动、/amcl_pose 来了，自己修正回来
+```
+
+**原因**：`ekf_global` 在 22 秒启动，而 **`/amcl_pose` 受 `update_min_d: 0.25` /
+`update_min_a: 0.2` 门控，车静止时不发**（见 §27）。于是它启动后的 80 秒里
+**只有速度输入、没有绝对位姿**，只能从 0 开始积分 → `map→odom` 偏出 1.89 m。
+**这期间全局代价地图是偏的，导航必然失败。**
+
+**修法**：在 `ekf_global` 启动之前，用 AMCL 的 `/request_nomotion_update` 服务
+**强制它做一次更新并发布 `/amcl_pose`**：
+
+```python
+force_amcl_update = ExecuteProcess(
+    cmd=['bash', '-c',
+         'for i in 1 2 3; do '
+         '  ros2 service call /request_nomotion_update std_srvs/srv/Empty >/dev/null 2>&1; '
+         '  sleep 1; '
+         'done; echo "[bringup] 已强制 AMCL 更新 3 次"'],
+    output='screen',
+)
+
+# 返回列表里：
+TimerAction(period=20.0, actions=[force_amcl_update]),   # 先强制 AMCL 更新
+TimerAction(period=25.0, actions=[ekf_global]),          # 再起 ekf_global
+```
+
+**修复后实测（车全程没动过）**：
+
+```
+map->odom : x=+0.0445  y=-0.0428  yaw=+0.03°
+odom 位姿 : x=+0.2404  y=+0.0148  yaw=-0.0337
+map->odom 平移量 = 0.0617 m       ✅ 正确
+```
+
+#### 两级 EKF 的最终验收数据
+
+| 项 | 值 |
+|---|---|
+| `map → odom` | **28.2 Hz**（AMCL 本来只有 10 Hz → 确认已接管） |
+| `odom → base_footprint` | **29.6 Hz** |
+| `/odometry/global` | 28.2 Hz |
+| `/odometry/local` | 29.6 Hz |
+| 车静止时 `map→odom` 平移量 | **0.062 m** |
+| Nav2 三个 lifecycle | 全部 `active` |
+| 全局代价地图 | 110×81 @ 0.05 ✅ |
+
+**三个 lifecycle 全 active + 两级 TF 都是连续高频 → 方向 3 的主目标达成。**
+
+#### 一个额外收获：`collision_monitor` 的 STOP 是**全向锁死**
+
+实验中途车撞到了世界里的方块，激光最近 0.21 m（< `PolygonStop` 的 0.28 m），
+`collision_monitor` 进入 STOP。此时：
+
+- 前进被拦（预期）
+- **倒车也被拦** —— `PolygonStop` 会把整条 `cmd_vel` 归零，**不分方向**
+
+结果车被彻底锁死，只能重启仿真。**实操上要注意：撞墙后不能靠倒车自救。**
+
+> **涉及文件**：`src/my_robot_description/config/ekf_global.yaml`、
+> `src/my_robot_description/config/nav2_params.yaml`、
+> `src/my_robot_description/launch/bringup_all.launch.py`
 
 ## 项目结构
 
@@ -2417,6 +2554,8 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] 相机进入导航链路：红块检测 → 像素反投影到 map → Nav2 导航（实测投影误差 2~3 cm）
 - [x] 单元测试：抽出 `geometry.py`（零 ROS 依赖）+ 13 个 pytest 用例，0.14 秒跑完
 - [x] launch 参数化与一键启动（`bringup_all.launch.py`，一条命令 18 秒全栈就绪）
+- [x] 两级 EKF：`ekf_local` 接管 `odom→base_footprint`（30 Hz）+ `ekf_global` 接管 `map→odom`（28 Hz）
+- [ ] 第 ⑤ 步：对比 AMCL 短暂失效时单级 vs 两级的 `map→odom` 跳变幅度
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
 
 ## 调试经验（踩坑记录）
@@ -2479,7 +2618,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
-| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑭ 视觉目标导航：`red_target_detector`（红块→像素反投影→map 坐标，投影误差 2~3 cm）+ `go_to_target`（多帧收敛 + 自适应 standoff + BasicNavigator）；实测车 (0,0)→(0.31,-0.04)、距目标 0.209 m < 容差 0.25、`status=4 SUCCEEDED`；修掉 `isTaskComplete()` 在回调里二次 spin、`use_sim_time` 未开、目标落入膨胀区三个问题<br>⑮ 单元测试：把纯几何计算从 ROS 节点抽成 `geometry.py`，写 13 个 pytest 用例（光学系→车体旋转、四元数、像素反投影、地面求交、双向往返），0.14 秒全部通过；建立「期望值必须来自被测代码之外」的 5 类来源与变异测试验证法<br>⑯ launch 参数化：`maps/` 用 `git mv` 搬进 `my_robot_description` 包（CMakeLists 加 `maps`）并同步更新 README 全部路径；新增 `bringup_all.launch.py`（`ExecuteProcess` 清理 / `TimerAction` 分阶段 / `IncludeLaunchDescription` 接 Nav2 / `PathJoinSubstitution` 免绝对路径 / `headless` 参数），把「7 终端 12 命令 3 次凭感觉等待」压成一条命令、18 秒全栈就绪；排查 `pkill -f` 两次自匹配（含 echo 文本里出现进程名）、`;` 掩盖失败、launch 异步执行、`ros2 daemon` 缓存陈旧四个坑<br>⑰ 两级 EKF 第 1 级落地 + 仿真时钟陷阱：`ekf_local` 接管 `odom→base_footprint`（`diff_drive` 关 `publish_odom_tf`、EKF `publish_tf: true`），实测 `odom→base_footprint` **30.0 Hz**、轮子 TF 99.9 Hz、运动链 `/cmd_vel 0.2 → /cmd_vel_final 0.2 → /odom vx 0.1995` 全通；排查出 EKF 配置 30 Hz 只跑 9.5 Hz 的根因是 **`/gazebo` 的 `publish_rate` 默认 10 Hz 节流 `/clock`，把全系统 `use_sim_time` 定时器压到 10 Hz 以内**，改 100 Hz 后 `/clock` 77.6 Hz、EKF 30.06 Hz；顺带四组降载（Nav2 组件化 13→4 participant、`FASTDDS_BUILTIN_TRANSPORTS=UDPv4` 消除 SHM 抢端口、相机 320×240@5、物理 250 Hz 步长 4 ms）使 `sy` 45%→14%、RTF 0.949→0.999<br>⑱ 排查「AMCL 不发布 `map→odom`」：**结论是 AMCL 一直正常（干净环境下 `map→odom` 9.8 Hz、`/odom` 50.0 Hz、`/scan` 9.956 Hz、`/odometry/local` 30.5 Hz 全部达标，整个运行只丢 1 帧激光）**，之前查不到是被孤儿进程污染的 DDS 图骗了；顺带揪出真 bug：**Linux `comm` 最多 15 字符，`pkill -9 -x robot_state_publisher`（21 字符）从 §29 起从未生效**，改为 `-f "[r]obot_state_publisher"`；并确定查询前必须等 8~10 秒 DDS 发现 |<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
+| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑭ 视觉目标导航：`red_target_detector`（红块→像素反投影→map 坐标，投影误差 2~3 cm）+ `go_to_target`（多帧收敛 + 自适应 standoff + BasicNavigator）；实测车 (0,0)→(0.31,-0.04)、距目标 0.209 m < 容差 0.25、`status=4 SUCCEEDED`；修掉 `isTaskComplete()` 在回调里二次 spin、`use_sim_time` 未开、目标落入膨胀区三个问题<br>⑮ 单元测试：把纯几何计算从 ROS 节点抽成 `geometry.py`，写 13 个 pytest 用例（光学系→车体旋转、四元数、像素反投影、地面求交、双向往返），0.14 秒全部通过；建立「期望值必须来自被测代码之外」的 5 类来源与变异测试验证法<br>⑯ launch 参数化：`maps/` 用 `git mv` 搬进 `my_robot_description` 包（CMakeLists 加 `maps`）并同步更新 README 全部路径；新增 `bringup_all.launch.py`（`ExecuteProcess` 清理 / `TimerAction` 分阶段 / `IncludeLaunchDescription` 接 Nav2 / `PathJoinSubstitution` 免绝对路径 / `headless` 参数），把「7 终端 12 命令 3 次凭感觉等待」压成一条命令、18 秒全栈就绪；排查 `pkill -f` 两次自匹配（含 echo 文本里出现进程名）、`;` 掩盖失败、launch 异步执行、`ros2 daemon` 缓存陈旧四个坑<br>⑰ 两级 EKF 第 1 级落地 + 仿真时钟陷阱：`ekf_local` 接管 `odom→base_footprint`（`diff_drive` 关 `publish_odom_tf`、EKF `publish_tf: true`），实测 `odom→base_footprint` **30.0 Hz**、轮子 TF 99.9 Hz、运动链 `/cmd_vel 0.2 → /cmd_vel_final 0.2 → /odom vx 0.1995` 全通；排查出 EKF 配置 30 Hz 只跑 9.5 Hz 的根因是 **`/gazebo` 的 `publish_rate` 默认 10 Hz 节流 `/clock`，把全系统 `use_sim_time` 定时器压到 10 Hz 以内**，改 100 Hz 后 `/clock` 77.6 Hz、EKF 30.06 Hz；顺带四组降载（Nav2 组件化 13→4 participant、`FASTDDS_BUILTIN_TRANSPORTS=UDPv4` 消除 SHM 抢端口、相机 320×240@5、物理 250 Hz 步长 4 ms）使 `sy` 45%→14%、RTF 0.949→0.999<br>⑱ 排查「AMCL 不发布 `map→odom`」：**结论是 AMCL 一直正常（干净环境下 `map→odom` 9.8 Hz、`/odom` 50.0 Hz、`/scan` 9.956 Hz、`/odometry/local` 30.5 Hz 全部达标，整个运行只丢 1 帧激光）**，之前查不到是被孤儿进程污染的 DDS 图骗了；顺带揪出真 bug：**Linux `comm` 最多 15 字符，`pkill -9 -x robot_state_publisher`（21 字符）从 §29 起从未生效**，改为 `-f "[r]obot_state_publisher"`；并确定查询前必须等 8~10 秒 DDS 发现<br>⑲ 两级 EKF 第 2 级落地：新增 `config/ekf_global.yaml`（`world_frame: map`、`publish_tf: true`、`pose0=/amcl_pose` 取 x/y/yaw、`odom0=/odometry/local` 只取 vx/vyaw），关掉 `amcl.tf_broadcast`，在 launch 里 20 秒强制 AMCL 更新、25 秒起 `ekf_global`；实测 `map→odom` **28.2 Hz**（AMCL 原 10 Hz，确认接管）、`odom→base_footprint` 29.6 Hz、车静止时 `map→odom` 平移量 **0.062 m**、Nav2 三 lifecycle 全 active；第 ③ 步量化出「无滑移时融合比轮式差 6.4 倍（0.807° vs 0.126°），融合价值在于抗失效而非提精度」；并踩到两个坑：`ekf_global` 缺初始绝对位姿导致 `map→odom` 偏 1.89 m（用 `/request_nomotion_update` 解决）、`collision_monitor` 的 STOP 会全向锁死连倒车都拦 |<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
 
 ## 说明
 
