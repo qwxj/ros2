@@ -751,6 +751,9 @@ Gazebo /imu（准）  ───────────────────�
 | **`ros2 run` 起来了但什么也不干** | `collision_monitor` 无订阅、无发布，像"没工作" | 它是 **Lifecycle 节点**，日志里写着 `Waiting on external lifecycle transitions to activate`。必须 `ros2 lifecycle set ... configure/activate`，或交给 `lifecycle_manager` |
 | **矩形多边形的角落比正前方更早触发** | 前向 ±30° 最近距离 0.417 m，但 0.28 m 的急停区已经触发 | 矩形四角 `(0.28, ±0.22)` 距车心 0.356 m，斜前方 40~45° 的点先落进去。统计"最近距离"时要考虑角度 |
 | **录 bag 前没确认目录创建** | 做完整套实验，最后发现没有任何新 bag | `ros2 bag record` 后必须看到 `Recording...`，并另开终端 `ls -ld bags/xxx` 确认目录存在、结束后 `du -sh` 确认不是 0 |
+| **`status: 4` 是成功，不是放弃** | 把 `4` 当 ABORTED，白排查一整轮 | `STATUS_SUCCEEDED = 4`、`STATUS_CANCELED = 5`、`STATUS_ABORTED = 6`。**先查枚举再解读现象** |
+| **`isTaskComplete()` 会在回调里二次 spin** | 定时器里调它，结果检查永远不触发 | 它内部调 `spin_until_future_complete`。在回调/定时器里改用 `self.result_future.done()` |
+| **视觉目标必须落在视野锥内且无遮挡** | 检测器一条不发，任务节点干等 | 相机水平 FOV 60° → 只有 ±30°。放目标前用 `/scan` 确认正前方最近距离就是它 |
 
 > **可信判据 = 数据体检三条**：三个话题 Hz 符合预期（50 / 100 / 10）、
 > `Publisher count` 为 1、自洽性误差在几度以内。三条都满足，结论才可信。
@@ -915,6 +918,174 @@ t=2.5s  0.174 → t=5.0s  0.111 → t=10.0s  0.047 → t=15.0s  0.016
 > **涉及文件**：`src/my_robot_description/config/collision_monitor.yaml`、
 > `src/my_robot_description/launch/gazebo.launch.py`、`src/my_robot_description/urdf/robot.urdf`
 
+### 27. 视觉目标导航：相机 → 目标点 → Nav2
+
+#### 目标
+
+相机画面里找到一个红色箱子 → 算出它在 `map` 坐标系里的位置 → 让 Nav2 开过去。
+
+#### 三段原理
+
+```
+① 像素 (u,v) ──K⁻¹──▶ 相机光学坐标系方向向量
+② 方向向量 ──固定旋转 + TF──▶ map 坐标系方向
+③ 从相机光心沿该方向射出，与地面 z=0 求交 ──▶ 目标在地图上的位置
+```
+
+**① 内参反投影**
+
+```
+d_opt = normalize( K⁻¹ · [u, v, 1]ᵀ )
+```
+
+`K` 从 `/camera/camera_info` 的 `k` 字段读。实测 `fx=554.4 fy=554.4 cx=320.5 cy=240.5`，
+与「640 px / 水平 FOV 60°」的理论值 `320/tan(30°)=554.3` 完全吻合。
+
+**② 光学坐标系 → 车体坐标系**（最容易搞错的一步）
+
+| 光学坐标轴（ROS 图像约定） | 车体坐标轴 |
+|---|---|
+| +X（图像向右） | **−Y** |
+| +Y（图像向下） | **−Z** |
+| +Z（镜头朝向） | **+X** |
+
+```python
+R_OPTICAL_TO_LINK = np.array([[0.0, 0.0, 1.0],
+                              [-1.0, 0.0, 0.0],
+                              [0.0, -1.0, 0.0]])
+```
+
+再用一次 `lookup_transform(map, camera_link)` 拿到相机在 map 里的位姿 —— 车在动、相机装在车上，
+这些都由 TF 解决，**不硬编码任何安装位置**。
+
+**③ 射线与地面求交**
+
+```
+光心 p（TF 的平移）、方向 d（上面算的单位向量）
+地面 z = 0  →  t = -p.z / d.z
+目标位置 = p + t·d
+```
+
+**这一段的本质是「靠先验假设测距」**：假设目标在地面上。
+
+#### 两个必须知道的实现细节
+
+**① 投影要用「底部边缘」，不能用整块重心**
+
+箱子重心常高于相机（我们相机只有 0.08 m 高）。从相机射向箱子重心的射线是**朝上**的，
+永远交不到 `z=0` → `d.z >= 0` → 返回 None。
+
+```python
+ys, xs = np.nonzero(mask)
+v_bottom = int(ys.max())          # 图像里 y 最大 = 最贴近地面的那条边
+band = ys >= v_bottom - 5         # 底边附近 6 行
+u = float(xs[band].mean())
+v = float(v_bottom)
+```
+
+**② TF 查询要「先按图像时间戳，失败退回最新」**
+
+```python
+for tag, tq in (('stamped', Time.from_msg(stamp) - Duration(seconds=0.02)),
+                ('latest',  Time())):
+    try:
+        tf = self.tf_buffer.lookup_transform(parent, camera, tq, timeout=Duration(seconds=0.15))
+        self.tf_mode = tag
+        return tf
+    except TransformException:
+        continue
+```
+
+> **为什么需要回退**：Gazebo 相机的时间戳可能与 TF 缓存的时间窗错位
+> （日志里见过图像时间戳比最新 TF 还新 0.7 s）。只用时间戳会大量失败，只用最新则车旋转时有
+> `d·ω·Δt` 的滞后误差。**工程答案是"优先正确的，失败退回可用的，并把用了哪种暴露在日志里"
+> —— 日志里的 `tf=stamped/latest` 就是干这个的，不静默降级。**
+
+#### 实测精度
+
+| 项 | 数值 |
+|---|---|
+| 红块像素 | 40840 px |
+| 投影结果 | **(1.20, −0.45)** |
+| 箱子真值中心 | (1.40, −0.60)，半宽 0.2 |
+| 理论"近表面"点 | ≈ (1.22, −0.46) |
+| **投影真实误差** | **≈ 2~3 cm** |
+
+那 0.2 m 的偏差**不是误差，是语义差**：投影的是箱子**近前表面的底边**，不是中心。
+对导航反而是好事 —— 目标点落在箱子表面，车正好停在前面。
+
+#### `standoff`：目标必须退出代价地图的膨胀区
+
+箱子的表面落在**致命代价**格子里，直接导航过去会被拒绝。要在「车→目标」方向上回退一段。
+实测不同 `standoff` 的目标点代价（箱子膨胀半径 0.55 m）：
+
+| standoff | 目标点 | 代价地图值 | 判定 |
+|---|---|---|---|
+| 0.30 m | (1.06, −0.37) | **99** | 致命 ❌ |
+| 0.45 m | (0.92, −0.32) | **76** | 高 ⚠️ |
+| 0.60 m | (0.77, −0.27) | 35 | 中 |
+| **0.70 m** | (0.68, −0.24) | **0** | **自由 ✅ 临界点** |
+
+**所以 `standoff` 默认取 0.80 m。** 但还要防止"退到车屁股后面去"，于是做自适应：
+
+```python
+eff = min(self.standoff, max(0.30, dist - 0.50))
+```
+
+`dist` 是车到视觉目标的距离。这样车离得近时目标点不会落在车旁边（否则 `xy_goal_tolerance 0.25`
+会立即判成功、车一动不动）。
+
+#### 视野锥：这次踩的最大坑
+
+相机水平 FOV 60° → **只能看 ±30°**，且中间不能有遮挡。
+
+曾经把红箱子放到 `(2.2, 0.3)`，那正好在**世界里原有方块 (2, 0) 的正后方** ——
+完全被挡住，检测器一条都发不出来，`go_to_target` 干等了几分钟。
+
+| 目标距离 | 允许的横向偏移（±30°） |
+|---|---|
+| 1.0 m | ±0.45 m |
+| 1.5 m | ±0.75 m |
+| 2.0 m | ±1.05 m |
+
+**放目标前先确认两件事**：在 ±30° 锥内、且 `/scan` 正前方最近距离就是它（不是别的东西）。
+
+#### 完整结果
+
+```
+红块像素           40840 px
+检测到 map 坐标     (1.20, -0.45)
+车起点              (0.00, 0.01)
+自适应回退          eff = min(0.80, 1.28-0.50) = 0.78 m
+导航目标            (0.47, -0.18)
+车最终位置          (0.31, -0.04)
+距目标              0.209 m  <  容差 0.25
+navigate_to_pose    status = 4  →  SUCCEEDED ✅
+```
+
+#### 一个浪费了一整轮排查的陷阱：**`status: 4` 是成功**
+
+```python
+STATUS_UNKNOWN   = 0
+STATUS_ACCEPTED  = 1
+STATUS_EXECUTING = 2
+STATUS_CANCELING = 3
+STATUS_SUCCEEDED = 4      # ← 4 是成功！
+STATUS_CANCELED  = 5
+STATUS_ABORTED   = 6      # ← 6 才是放弃
+```
+
+把 `4` 读成 "ABORTED" 之后，看到的现象全被错误解释：
+
+- 「`/cmd_vel` 45 秒一条都没有」→ 实际是**车已在容差内，判定成功，无需移动**
+- 「controller 坏了」→ 实际 controller 完全正常（直接发 `FollowPath` 立刻驱动车走了 0.43 m）
+- 「Behavior Tree 卡住」→ 实际 `ComputePathToPose` 三条路径全部 `status=4`（成功）
+
+**教训：先确认枚举/状态码的含义，再解读现象。一个整数含义搞错，会浪费一整轮排查。**
+
+> **涉及文件**：`src/my_robot_tasks/my_robot_tasks/red_target_detector.py`、
+> `src/my_robot_tasks/my_robot_tasks/go_to_target.py`
+
 ## 项目结构
 
 ```text
@@ -989,7 +1160,9 @@ ros2/
 │   │   │   ├── pose_monitor.py       # 订阅 /odom，定时汇报位置与累计里程
 │   │   │   ├── cmd_vel_repeater.py   # 一次性指令 → 持续指令流（rclpy 发布练习，链路上不启用）
 │   │   │   ├── patrol.py             # BasicNavigator 巡逻任务脚本
-│   │   │   └── odom_noise.py         # 给 /odom 注入角速度偏差，产出 /odom_noisy（融合实验用）
+│   │   │   ├── odom_noise.py         # 给 /odom 注入角速度偏差，产出 /odom_noisy（融合实验用）
+│   │   │   ├── red_target_detector.py # 红块检测 → 像素反投影到 map 坐标
+│   │   │   └── go_to_target.py       # 订阅 /detected_target，回退 standoff 后导航过去
 │   │   └── setup.py                  # entry_points 声明可执行脚本
 │   └── my_robot_description/         # 机器人描述、仿真与可视化
 │       ├── urdf/
@@ -1436,6 +1609,36 @@ ros2 topic echo /cmd_vel_final --field linear.x
 
 > ⚠️ **`collision_monitor` 不跑，车完全不能动** —— 差速插件只听 `/cmd_vel_final`，这是有意的设计，安全层不可绕过。
 
+### 13. 视觉目标导航
+
+```bash
+# 前置：Gazebo + Nav2 已按 §12 启动，并调过 /set_initial_pose
+
+# ① 把红箱子放到【车正前方 ±30° 锥内、无遮挡】的位置
+ros2 run gazebo_ros spawn_entity.py -file obstacle.sdf -entity red_target \
+  -x 1.40 -y -0.60 -z 0.2
+
+# ② 检测器（输出像素→map 坐标）
+ros2 run my_robot_tasks red_target_detector
+
+# ③ 任务节点（收敛 5 帧 → 自适应回退 standoff → 发 Nav2 目标）
+ros2 run my_robot_tasks go_to_target --ros-args -p standoff:=0.80
+```
+
+期望输出：
+
+```
+[INFO] 内参 fx=554.4 fy=554.4 cx=320.5 cy=240.5
+[INFO] 红块 40840 px 底边@(553,280) -> map (1.20, -0.45)  [tf=stamped ok=1 tf失败=6 投影失败=0]
+[INFO] 第 5/5 帧  (1.20, -0.45)  抖动 0.000 m
+[INFO] 车到目标 1.28 m，实际回退 0.78 m（上限 0.80）
+[INFO] 导航目标 (0.47, -0.18)，等 bt_navigator 上线...
+[INFO] ✅ 到达目标（status=4 成功）
+```
+
+> **关键参数**：`standoff` 必须 ≥ 0.70（否则目标落在膨胀区）；
+> 红箱子必须在相机 ±30° 视野锥内且无遮挡。
+
 ## 环境准备与常用命令
 
 命令速查，避免每次重新翻找。
@@ -1602,6 +1805,13 @@ pgrep -a gzserver                           # 确认服务端还活着
   只能选低速轨迹 —— 这不是显式限速规则，而是采样评分的副产品。
 - 学会用**安全代价**做量化对比：动态障碍场景下导航时长从 30.1 s 增到 59.6 s（+98%），
   换来"没有撞上突然出现的障碍"，安全与效率的权衡第一次有了具体数字。
+- 打通**视觉 → 导航**的完整闭环：相机内参反投影、光学坐标系→车体的固定旋转、
+  射线与地面求交、TF 位姿接入，实测投影误差仅 2~3 cm。
+- 理解**单目测距的本质是先验假设**：假设目标在地面上才能把射线投到 z=0；
+  因此必须投「物体底部边缘」而不是重心（重心常高于相机，射线朝上就永远交不到地面）。
+- 学会把「视觉目标的物理属性」和「导航可达性」联系起来：物体表面落在代价地图的致命
+  膨胀区里，必须用 `standoff` 回退；且 `standoff` 要随检测距离自适应，否则目标会落在
+  车旁边导致 `xy_goal_tolerance` 立即判成功、车一动不动。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -1627,6 +1837,8 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] 注入 odom 误差源后重做融合实验：偏差 10.0% → 融合后 0.9%（消除 91%，精度提升 11 倍）
 - [ ] 单元测试（gtest / pytest）与组件容器化部署
 - [ ] 平滑器（`smoother_server`）与恢复行为（`behavior_server`）实操
+- [x] 相机进入导航链路：红块检测 → 像素反投影到 map → Nav2 导航（实测投影误差 2~3 cm）
+- [ ] 单元测试（`pytest` 覆盖检测阈值与投影公式）
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
 
 ## 调试经验（踩坑记录）
@@ -1689,7 +1901,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
-| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
+| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑭ 视觉目标导航：`red_target_detector`（红块→像素反投影→map 坐标，投影误差 2~3 cm）+ `go_to_target`（多帧收敛 + 自适应 standoff + BasicNavigator）；实测车 (0,0)→(0.31,-0.04)、距目标 0.209 m < 容差 0.25、`status=4 SUCCEEDED`；修掉 `isTaskComplete()` 在回调里二次 spin、`use_sim_time` 未开、目标落入膨胀区三个问题 |<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
 
 ## 说明
 
