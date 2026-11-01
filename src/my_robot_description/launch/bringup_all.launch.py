@@ -75,7 +75,7 @@ def generate_launch_description():
             'map': map_yaml,
             'params_file': nav2_params,
             'use_sim_time': 'true',
-            'use_composition': 'True',
+            'use_composition': 'False',
         }.items(),
     )
 
