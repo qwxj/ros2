@@ -1,0 +1,41 @@
+ekf_filter_node:
+  ros__parameters:
+    use_sim_time: true
+
+    # ---- 滤波基本参数 ----
+    frequency: 30.0          # 输出频率
+    sensor_timeout: 0.1
+    two_d_mode: true         # ★ 平面运动（差速车只有 x, y, yaw）
+
+    # ---- 坐标系 ----
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_footprint   # ★ 与 URDF 一致
+    world_frame: odom                 # ★ 这一级只在 odom 系内融合
+
+    # ---- 不抢 TF ----
+    publish_tf: false        # ★ odom->base_footprint 仍由 diff_drive 发布
+    publish_acceleration: false
+
+    # ---- 输入 1：轮式里程计 ----
+    odom0: /odom
+    odom0_config: [true,  true,  false,     # x, y, z
+                   false, false, false,      # roll, pitch, yaw
+                   true,  true,  false,     # vx, vy, vz
+                   false, false, true,      # vroll, vpitch, vyaw
+                   false, false, false]     # ax, ay, az
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # ---- 输入 2：IMU（只取角速度 z）----
+    imu0: /imu
+    imu0_config: [false, false, false,
+                  false, false, false,      # ★ 不取 orientation（协方差为 0）
+                  false, false, false,
+                  false, false, true,       # ★ 取 vyaw（角速度 z）
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: true

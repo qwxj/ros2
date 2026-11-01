@@ -649,6 +649,75 @@ spawn 的模型清掉。
 
 > **涉及文件**：`obstacle.sdf`
 
+### 25. IMU 接入与 EKF 传感器融合
+
+#### 传感器本身
+
+URDF 里加 `imu_link`（0.03³ 方块、0.02 kg）+ `<sensor type="imu">` + `libgazebo_ros_imu_sensor.so`，
+`update_rate 100`，陀螺 σ=0.0002 rad/s、加速度计 σ=0.017 m/s²，话题 `/imu`。
+
+静止实测：`orientation.w ≈ 1`、`angular_velocity ≈ 0`、**`linear_acceleration.z ≈ 9.83`**。
+
+> **加速度计测的是「比力」而不是「运动加速度」** —— 静止时地面支撑力向上 9.81 m/s²，
+> 所以 z 分量是 **+9.81**。这个值接近 9.81 恰恰说明 IMU 正常；等于 0 反而是错的。
+
+#### EKF 配置的三个关键选择
+
+| 选择 | 原因 |
+|---|---|
+| **`two_d_mode: true`** | 差速车只有 x、y、yaw 三个自由度；还避免 IMU 微小俯仰噪声污染位姿 |
+| **`publish_tf: false`** | `odom → base_footprint` 已由差速插件发布，EKF 再发一次会 TF 打架 |
+| **不用 IMU 的 `orientation`** | 实测 `orientation_covariance` 全是 **0**（等于宣称"绝对精确"），会让滤波器无视其他所有输入；真实 IMU 的绝对朝向也易受干扰 |
+| **不用 odom 的绝对 `yaw`** | 每 20 ms 一次的绝对朝向测量会压制角速度积分，让 IMU 的速率完全失效 |
+
+协方差对比（决定融合权重）：
+
+| 来源 | 角速度方差 | σ | 相对权重 |
+|---|---|---|---|
+| `/odom` 的 `twist.covariance` | 1e-3 | 0.032 rad/s | 1 |
+| `/imu` 的 `angular_velocity_covariance` | 4e-8 | 0.0002 rad/s | **25000** |
+
+#### 实验：原地转 13 秒，比较三种「转角」（干净数据）
+
+| 数据源 | 总转角 | 相对真实误差 |
+|---|---|---|
+| **IMU 角速度积分（真实）** | **310.3°** | — |
+| `/odom` 的 yaw | 307.6° | −2.7°（−0.9%） |
+| `/odometry/filtered` | 306.9° | −3.3°（−1.1%） |
+| 融合 − odom | −0.6° | 几乎无差别 |
+
+#### 结论：**这个仿真里融合看不出收益**
+
+仿真中没有打滑 —— `/odom` 的角速度与 IMU **完全一致**（都是 0.4583 rad/s），
+`/odom` 的 yaw 本身误差只有 0.9%。IMU 没有任何「可纠正的误差」可做，融合结果自然等于 odom。
+
+**「测不出收益」本身是有效结论**：在理想仿真里讨论融合优化没有意义。
+要真正验证融合价值，必须**人为注入误差源**：
+
+| 方案 | 做法 | 预期 |
+|---|---|---|
+| 降低车轮摩擦 | 车轮加 `<mu1>0.05</mu1><mu2>0.05</mu2>` | 打滑 → odom 过报 → 融合纠正 |
+| **伪造 odom 噪声** | rclpy 节点给 `/odom` 的 yaw 加 5% 漂移，另发 `/odom_noisy` | 误差量可控、可重复 |
+| 给陀螺加零偏 | SDF 噪声 `<mean>` 设 0.02 rad/s | 看 odom 能否把漂移的 IMU 拉回来 |
+
+#### 排查实录：六个把结论带偏的坑
+
+这一节花了十几轮才定位，**过程比结论更有价值**。
+
+| # | 坑 | 现象 | 正确做法 |
+|---|---|---|---|
+| 1 | **改 `src/` 不等于改 `install/`** | 改了 `ekf.yaml` 但行为不变 | `ros2 pkg prefix` 取到的是 install 副本；改完 `colcon build`，或直接用 src 路径启动 |
+| 2 | **参数只在节点启动时读一次** | 编译后仍无效 | 必须重启节点，并用 `ros2 param get` 验证运行时的实际值 |
+| 3 | **重复启动产生同名节点** | 两轮分析结论互相矛盾 | `ros2 node list` 出现两行同名节点、`/odometry/filtered` 的 `Publisher count: 2` → 数据被两个实例混合 |
+| 4 | **丢帧让积分虚高** | `/odom` 的 `∫ωdt` 与自身 `yaw` 差 12° | 积分前先验 Hz（应 50/100/10）；`trapz` 遇丢帧会按匀速补，必须跳过间隔过大的段 |
+| 5 | **不做自洽性检查** | 直接采信了不可能的数据 | 同一消息内 `∫twist.ω dt` 应等于 `Δpose.yaw`；对不上说明数据或算法有问题 |
+| 6 | **把「指令 vs 实际」当成「轮式 vs 真值」** | 误判「有 8% 打滑」 | 指令 0.5 → 实际 0.4583 是**指令跟踪误差**；判断里程计漂移要比 `/odom` 与 IMU，而两者一致 |
+
+> **可信判据 = 数据体检三条**：三个话题 Hz 符合预期（50 / 100 / 10）、
+> `Publisher count` 为 1、自洽性误差在几度以内。三条都满足，结论才可信。
+
+> **涉及文件**：`src/my_robot_description/urdf/robot.urdf`、`src/my_robot_description/config/ekf.yaml`
+
 ## 项目结构
 
 ```text
@@ -735,7 +804,8 @@ ros2/
 │       ├── config/
 │       │   ├── slam_toolbox.yaml     # SLAM 参数
 │       │   ├── nav2_params.yaml      # Nav2 参数（已按 0.4×0.3 m 小车调整）
-│       │   └── nav2_params.baseline.yaml  # 调参实验的基线备份
+│       │   ├── nav2_params.baseline.yaml  # 调参实验的基线备份
+│       │   └── ekf.yaml              # robot_localization EKF 融合配置
 │       ├── rviz/
 │       │   └── view.rviz             # 预配置的 RViz 布局
 │       ├── CMakeLists.txt
@@ -1108,6 +1178,33 @@ ros2 run my_robot_tasks patrol
 >   pose: {pose: {position: {x: 1.0, y: 2.0, z: 0.0}}} }"
 > ```
 
+### 11. IMU 与 EKF 融合
+
+```bash
+# ① Gazebo（提供 /clock /odom /imu）
+ros2 launch my_robot_description gazebo.launch.py
+
+# ② 确认三路输入都在
+ros2 topic hz /odom      # ~50
+ros2 topic hz /imu       # ~100
+ros2 topic hz /clock     # ~10
+
+# ③ 启动 EKF（注意：只启动一个！INFO 级别没有任何输出是正常的）
+ros2 run robot_localization ekf_node --ros-args \
+  --params-file $(ros2 pkg prefix my_robot_description)/share/my_robot_description/config/ekf.yaml
+
+# ④ 三重验证（都过了才能开始测）
+pgrep -cf ekf_node                                    # 必须 1
+ros2 topic info /odometry/filtered | grep Publisher    # 必须 1
+ros2 param get /ekf_filter_node odom0_config           # 第 6 个值应为 False
+
+# ⑤ 看结果
+ros2 topic hz /odometry/filtered    # ~10 Hz（受 /clock 更新率限制）
+```
+
+> **`ekf_node` 启动后一句话都不打印，这是正常的** —— 判断它是否工作只能看
+> `/odometry/filtered` 话题是否存在。没输出不等于卡住，不要急着 Ctrl+C。
+
 ## 环境准备与常用命令
 
 命令速查，避免每次重新翻找。
@@ -1260,6 +1357,12 @@ pgrep -a gzserver                           # 确认服务端还活着
 - 理解三层避障的真实分工：`obstacle_layer` 让「地图文件里没有的障碍」也能进入
   全局规划并被**重规划**绕开，而不是靠局部临时闪避；绕行代价（+42% 路程）直接
   由 `inflation_radius` 决定。
+- 打通 IMU 接入与 EKF 融合链路：URDF 传感器、`robot_localization` 的 `two_d_mode` /
+  `world_frame` / `publish_tf` 三个关键选择，以及「不用 orientation、只用 vyaw」的原因。
+- 建立**数据可信性检查**的流程：话题 Hz → `Publisher count` → 自洽性（`∫ωdt` vs `Δyaw`），
+  三条都过才下结论；这套检查直接避免了多次错误结论。
+- 认识到「测不出收益」也是有效结论：仿真中 `/odom` 与 IMU 的角速度完全一致（0.4583 rad/s），
+  融合没有可纠正的误差，要验证融合必须人为注入误差源。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -1281,7 +1384,8 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] rclpy 编程（`ament_python` 包 / 订阅发布定时器 / `nav2_simple_commander` 任务脚本）
 - [x] 动态避障实验（地图外障碍，验证三层避障分工）
 - [ ] 代价相关限速（靠近障碍自动降速）+ `nav2_collision_monitor` 独立急停
-- [ ] IMU 传感器仿真 + `robot_localization` 扩展卡尔曼融合
+- [x] IMU 传感器仿真 + `robot_localization` 扩展卡尔曼融合（结论：仿真中 odom 已足够准，融合收益测不出）
+- [ ] 注入 odom 误差源后重做融合实验（伪造 odom 漂移 / 降低车轮摩擦 / 陀螺零偏）
 - [ ] 单元测试（gtest / pytest）与组件容器化部署
 - [ ] 平滑器（`smoother_server`）与恢复行为（`behavior_server`）实操
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
@@ -1335,6 +1439,9 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **心跳不能重复叠加** | 加了 repeater 之后，看门狗的「断流停车」失效 | repeater 持续刷新指令流，watchdog 永远等不到超时。一层心跳足够，重复叠加会让保护失效 |
 | **Gazebo GUI 改不了几何尺寸** | `Insert → Box` 放下的方块没法改大小 | GUI 的 `S`（Scale）只缩视觉、不改碰撞体。必须用 SDF 文件 + `spawn_entity.py` 指定 `<size>` |
 | **文档里的 `...` / `<xxx>` 是占位符** | 照抄 `map:=...` 后 launch 报 `No such file or directory: '...'` | 占位符必须替换成真实路径 |
+| **重复启动会产生同名节点** | 同一份数据两轮分析结论矛盾 | `ros2 node list` 会出现两行一模一样的节点名；`ros2 topic info` 的 `Publisher count` 大于 1 → 数据被多实例混合。判断口诀：**可疑数据先查 Publisher count** |
+| **积分前必须先验采样率** | `∫ωdt` 与自身 `yaw` 差 12° | 丢帧时 `trapz` 会按匀速补全间隔，结果虚高。先看话题 Hz 与中位 dt，积分时跳过间隔过大的段 |
+| **静默节点的「没输出」不等于「没工作」** | `ekf_node` 启动无任何日志，误以为卡住而 Ctrl+C | 用话题判断（`ros2 topic list` / `ros2 topic hz`），而不是等日志 |
 
 ## 开发记录
 
@@ -1343,7 +1450,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
-| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s） |
+| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题 |
 
 ## 说明
 
