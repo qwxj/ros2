@@ -462,6 +462,63 @@ ros2 action send_goal /follow_waypoints nav2_msgs/action/FollowWaypoints "{
 
 > **涉及文件**：`tools/bag_metrics.py`、`src/my_robot_description/config/nav2_params.yaml`
 
+### 22. DWB critic 调优：从「原地转 21%」到「0%」
+
+#### 问题
+
+昨天发现多点巡航时**原地转占了 33.7%** 的时间、单点导航占 21%。
+把 `max_vel_theta` 提到 1.5 也没降下来 —— 说明不是速度上限的问题。
+
+#### 两次失败的假设
+
+| 假设 | 改动 | 结果 |
+|---|---|---|
+| 朝向权重太高，DWB 想「先对准再走」 | `PathAlign.scale 32→8`、`GoalAlign.scale 24→6` | 原地转 **21.0% → 20.5%**（几乎不变），且路径从 1.74 m 变 1.82 m、时长 15.4 → 16.9 s（**反而变差**） |
+
+**失败原因**：`PathAlign` / `GoalAlign` 控制的是**中途**的朝向贴合，而问题根本不在中途。
+
+#### 关键一步：画时间线
+
+把 `/cmd_vel` 按 0.5 秒分桶，标记每格状态（`.` 真停 / `R` 原地转 / `=` 前进）：
+
+```
+ctrl_v030_fix:   =======================RRRRRR...
+ctrl_align8:     =========================RRRRRR...
+                 ↑ 全程前进               ↑ 最后 3 秒原地转
+```
+
+**结论一目了然：原地转 100% 发生在到达目标之后**，中途一次都没有。
+
+#### 真正的元凶：`RotateToGoal` + `yaw_goal_tolerance`
+
+车到达目标**位置**时的朝向是 -38.7°，而目标要求 yaw=0，
+`RotateToGoal` critic 会驱动它转 0.676 rad 对准；`xy_goal_tolerance: 0.25` 内还要反复微调，
+实际花了 **3.0 秒**（理论只需 0.78 s）。
+
+#### 实验数据（目标点 (1.5, -1.2)，直线 1.92 m）
+
+| 组 | 关键改动 | `\|v\|` 平均 | 运动时长 | 真停 | **原地转** | 轨迹 |
+|---|---|---|---|---|---|---|
+| C | 原配置（critic 32/24，`yaw_tol 0.25`） | 0.193 | 15.4 s | 8.4% | **21.0%** | 1.74 m |
+| D | `PathAlign 8` / `GoalAlign 6` | 0.202 | 16.9 s | 7.1% | 20.5% | 1.82 m |
+| **E** | **`RotateToGoal 0.0` + `yaw_tol 3.15`** | **0.251** | **10.8 s** | 11.1% | **0.0%** | 1.78 m |
+
+**E 组相对 C 组：原地转 21% → 0%，运动时长 15.4 s → 10.8 s（−30%），`|v|` 平均 +30%。**
+
+#### 结论：没有「更好的参数」，只有「匹配需求的参数」
+
+| 场景 | 配置 |
+|---|---|
+| 不在意最终朝向（送物、巡逻、扫地） | `RotateToGoal.scale: 0.0` + `yaw_goal_tolerance: 3.15` |
+| 在意朝向（充电桩对接、对位拍照、机械臂作业） | 保留默认 `32.0` / `0.25`，接受那 3 秒 |
+
+#### 方法论：先定位「哪一段」，再决定改哪个参数
+
+这次连续两轮预测错误，根因都是**直接跳到"改哪个参数"，而没先确认"现象发生在什么阶段"**。
+`tools/cmd_timeline.py` 就是为此写的 —— 三行输出就能把问题从"调参"变成"定位"。
+
+> **涉及文件**：`tools/cmd_timeline.py`、`src/my_robot_description/config/nav2_params.yaml`
+
 ## 项目结构
 
 ```text
@@ -551,7 +608,8 @@ ros2/
 ├── bags/                             # rosbag2 录制数据（已 gitignore，不入库）
 ├── maps/                             # SLAM 产出的地图（.pgm + .yaml，体积小可入库）
 ├── tools/
-│   └── bag_metrics.py                # 读 bag 输出导航指标（路径长度 / 速度 / 障碍距离）
+│   ├── bag_metrics.py                # 读 bag 输出导航指标（路径长度 / 速度 / 障碍距离）
+│   └── cmd_timeline.py               # 把 /cmd_vel 画成时间线，定位真停/原地转/前进的阶段
 ├── DEFAULT_FASTDDS_PROFILES.xml      # Fast DDS 自定义 profile（data_sharing 配置）
 ├── .gitignore
 └── README.md
@@ -1033,6 +1091,10 @@ pgrep -a gzserver                           # 确认服务端还活着
   下游不改则上游改动被静默吞掉；两处同时放开后导航时长才从 20.6 s 降到 15.4 s（−25%）。
 - 能用 `FollowWaypoints` 做任务级编排：5 航点巡航 11.07 m、追踪误差仅 2.7%，
   并识别出「多点任务效率瓶颈在转向对准（33.7% 时间在原地转），而非直线速度」。
+- 掌握「先定位现象发生在哪个阶段，再决定调哪个参数」的排查顺序：用 0.5 s 粒度的
+  指令时间线一眼看出原地转全部集中在到点后的 3 秒，从而避免了两轮无效的参数调整。
+- 理解 `RotateToGoal.scale` 与 `yaw_goal_tolerance` 的耦合：关掉朝向对准后原地转
+  21% → 0%、运动时长 −30%；但两者必须成对调整，否则目标永远不判定为到达。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -1051,6 +1113,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] Nav2 导航框架实践（地图 + AMCL + 全局规划 + 局部控制）
 - [x] Nav2 参数调优：离线实验方法 + `inflation_radius` 对比实验
 - [x] 控制参数调优（controller / `velocity_smoother` 两级限幅）与 `FollowWaypoints` 多点巡航
+- [x] DWB critic 调优：定位到 `RotateToGoal` 是「原地转」的真正来源
 - [ ] IMU 传感器仿真与融合
 - [ ] rclpy 节点、单元测试、组件容器化部署
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
@@ -1098,6 +1161,8 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **离线回放是开环的** | 发了目标、`/cmd_vel` 全 0、车不动 | bag 里的 `/odom`、`/tf` 决定位姿，Nav2 的 `/cmd_vel` 无人消费。离线只能对比「决策」，不能对比「结果」 |
 | **速度被 `velocity_smoother` 静默限幅** | `max_vel_x` 设 0.30，`/cmd_vel` 最大只有 0.26 | `velocity_smoother.max_velocity` 是链路上最后一道闸；改 controller 参数必须同步放开它，否则白改 |
 | **累计型指标不归一化会得出相反结论** | 抖动 1.12 的 bag 比抖动 0.40 的更差？ | 相邻速度差之和要除以采样数；不归一化时长 bag 天然显得更差 |
+| **调参前先看现象发生在「哪一段」** | 连续两轮改 critic 权重完全无效 | 把 `/cmd_vel` 按 0.5 s 分桶画时间线（`tools/cmd_timeline.py`），发现原地转 100% 在到点之后 —— 中途根本没有，改中途权重当然没用 |
+| **`RotateToGoal` 与 `yaw_goal_tolerance` 必须成对改** | 只关 `RotateToGoal.scale` 后目标一直不成功 | 关掉朝向对准但朝向容差仍是 0.25 rad，车停在容差外 → goal checker 不判定到达 → BT 反复重试 |
 
 ## 开发记录
 
@@ -1106,6 +1171,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
+| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）** |
 
 ## 说明
 
