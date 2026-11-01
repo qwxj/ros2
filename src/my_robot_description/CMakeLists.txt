@@ -24,7 +24,7 @@ if(BUILD_TESTING)
 endif()
 
 
-install(DIRECTORY urdf launch rviz worlds config
+install(DIRECTORY urdf launch rviz worlds config maps
   DESTINATION share/${PROJECT_NAME}
 )
 

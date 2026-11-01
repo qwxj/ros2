@@ -258,11 +258,11 @@
   `map_update_interval`（地图刷新周期）、`min/max_laser_range`（与 URDF 量程一致）。
 - 建图必须**真的移动**：原地不动只有一帧扫描，地图长不出来；
   绕一圈回到起点会触发**闭环检测（loop closure）**，能看到地图自动对齐修正。
-- 成果 `maps/my_map.pgm` + `my_map.yaml`：110×81 px @ 0.05 m/px = **5.5 m × 4.05 m**，
+- 成果 `src/my_robot_description/maps/my_map.pgm` + `my_map.yaml`：110×81 px @ 0.05 m/px = **5.5 m × 4.05 m**，
   空闲 76.9% / 障碍 2.4% / 未知 20.7%，`origin` 与 world 中障碍物位置吻合。
 
 > **涉及文件**：`src/my_robot_description/config/slam_toolbox.yaml`、
-> `maps/my_map.pgm`、`maps/my_map.yaml`
+> `src/my_robot_description/maps/my_map.pgm`、`src/my_robot_description/maps/my_map.yaml`
 
 ### 19. Nav2 自主导航
 
@@ -294,7 +294,7 @@
 
 > **涉及文件**：`src/my_robot_description/config/nav2_params.yaml`、
 > `src/my_first_pkg/src/cmd_vel_watchdog.cpp`、`src/my_robot_description/urdf/robot.urdf`、
-> `maps/my_map.yaml`
+> `src/my_robot_description/maps/my_map.yaml`
 
 ### 20. Nav2 参数调优：离线实验方法
 
@@ -349,7 +349,7 @@ ros2 bag record -o bags/tune_idle /scan /odom /tf /tf_static
 
 # ② 改参数后重启 Nav2（参数只在启动时读取，不用 colcon build）
 ros2 launch nav2_bringup bringup_launch.py \
-  map:=$HOME/ros2/maps/my_map.yaml \
+  map:=$(ros2 pkg prefix my_robot_description)/share/my_robot_description/maps/my_map.yaml \
   params_file:=$HOME/ros2/src/my_robot_description/config/nav2_params.yaml \
   use_sim_time:=true use_composition:=False
 
@@ -1318,11 +1318,13 @@ ros2/
 │       │   └── collision_monitor.yaml # 第四层安全：前方障碍降速 / 急停区域
 │       ├── rviz/
 │       │   └── view.rviz             # 预配置的 RViz 布局
+│       ├── maps/                     # SLAM 产出的地图（.pgm + .yaml，体积小可入库）
+│       │   ├── my_map.pgm
+│       │   └── my_map.yaml
 │       ├── CMakeLists.txt
 │       └── package.xml
 │
 ├── bags/                             # rosbag2 录制数据（已 gitignore，不入库）
-├── maps/                             # SLAM 产出的地图（.pgm + .yaml，体积小可入库）
 ├── tools/
 │   ├── bag_metrics.py                # 读 bag 输出导航指标（路径长度 / 速度 / 障碍距离）
 │   └── cmd_timeline.py               # 把 /cmd_vel 画成时间线，定位真停/原地转/前进的阶段
@@ -1616,7 +1618,7 @@ ros2 run rviz2 rviz2 \
 ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=cmd_vel_input
 
 # 建好之后保存（趁 slam_toolbox 还在运行）
-ros2 run nav2_map_server map_saver_cli -f maps/my_map
+ros2 run nav2_map_server map_saver_cli -f src/my_robot_description/maps/my_map
 ```
 
 三个要点：
@@ -1632,7 +1634,7 @@ ros2 launch my_robot_description gazebo.launch.py
 
 # 终端二：导航栈（地图与参数都必须显式传）
 ros2 launch nav2_bringup bringup_launch.py \
-  map:=$HOME/ros2/maps/my_map.yaml \
+  map:=$(ros2 pkg prefix my_robot_description)/share/my_robot_description/maps/my_map.yaml \
   params_file:=$(ros2 pkg prefix my_robot_description)/share/my_robot_description/config/nav2_params.yaml \
   use_sim_time:=true \
   use_composition:=False
