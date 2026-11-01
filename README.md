@@ -519,6 +519,136 @@ ctrl_align8:     =========================RRRRRR...
 
 > **涉及文件**：`tools/cmd_timeline.py`、`src/my_robot_description/config/nav2_params.yaml`
 
+### 23. rclpy 编程与任务脚本
+
+工作区里第一个 **`ament_python`** 包（前三个都是 `ament_cmake`）。
+
+#### C++ ↔ Python 对照
+
+| C++（rclcpp） | Python（rclpy） |
+|---|---|
+| `class Foo : public rclcpp::Node` | `class Foo(Node)`；`super().__init__('名字')` |
+| `create_subscription<T>(topic, 10, cb)` | `self.create_subscription(T, topic, cb, 10)` |
+| `create_wall_timer(50ms, cb)` | `self.create_timer(0.05, cb)` —— **单位是秒** |
+| `declare_parameter<T>("x", 1)` + `.as_int()` | `self.declare_parameter("x", 1).value` |
+| `add_executable(名 src/x.cpp)` | **`setup.py` 里的 `entry_points`** |
+| `ament_target_dependencies(...)` | `package.xml` 里的 `<depend>` |
+
+`entry_points` 的写法：`'可执行名 = 包名.模块名:main'`。
+
+#### `pose_monitor.py`：订阅 + 定时器 + 参数
+
+订阅 `/odom`，每秒汇报位置与累计里程（里程用相邻位姿的欧氏距离累加）。
+覆盖了 rclpy 的订阅、定时器、参数、日志四种基本用法，对应 C++ 侧的
+`image_processor`（订阅 + 处理）与 `cmd_vel_watchdog`（订阅 + 定时器）的组合。
+
+#### `cmd_vel_repeater.py`：一次有价值的「错误尝试」
+
+**动机**：曾误判"teleop 是一次性发布、被 0.5 s 看门狗超时打断"，于是写了这个
+"以 10 Hz 重复最后一条指令"的节点。
+
+**实测结论**：`teleop_twist_keyboard` 本身就是**以固定频率持续重发当前指令**的
+（锁存语义），repeater 完全多余 —— 而且它会让看门狗的"断流停车"永远触发不了
+（心跳被持续刷新）。
+
+**但它作为练习是完整的**（订阅 + 发布 + 定时器 + 参数），并且对**非周期指令源**
+（语音命令、REST 接口、单帧视觉指令）依然是正确的适配器模式。当前在链路上**不启用**。
+
+#### `patrol.py`：`nav2_simple_commander` 任务编排
+
+```python
+from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+
+nav = BasicNavigator()
+nav.waitUntilNav2Active()            # 等 bt_navigator + amcl
+nav.followWaypoints(poses)           # 非阻塞，返回"是否被接受"
+while not nav.isTaskComplete():      # 轮询
+    fb = nav.getFeedback()           # 有 current_waypoint
+    ...
+result = nav.getResult()             # TaskResult.SUCCEEDED / FAILED / CANCELED
+```
+
+**和 `ros2 action send_goal` 的本质区别是异步**：`followWaypoints` 立刻返回，
+等待期间可以插入"拍照 / 检测 / 上报"等业务逻辑 —— 这才是任务编排。
+同样的逻辑用 C++ 写约 150 行（要自己管 action client 的三套回调），Python 约 60 行。
+
+> 两个实现细节：目标点 `header.stamp` 留 0（Nav2 视为"用最新 TF"，避免节点时钟与
+> 仿真时钟不一致导致的外推错误）；`getattr(fb, 'current_waypoint', -1)` 容错不同版本字段差异。
+
+> **涉及文件**：`src/my_robot_tasks/`（`pose_monitor.py`、`cmd_vel_repeater.py`、`patrol.py`、`setup.py`）
+
+### 24. 动态避障实验（地图里没有的障碍）
+
+前面的避障都是「绕开地图里已有的墙 / 方块 / 圆柱」。这次验证的是
+**静态地图（`.pgm`）里不存在、只有激光能看到的障碍**。
+
+#### 实验设计
+
+| 项 | 做法 |
+|---|---|
+| 障碍 | `spawn_entity.py` 生成 0.4×0.4×0.4 m 的静态红色方块（`obstacle.sdf`）到 (1.0, 0) |
+| 为什么不用 GUI | Gazebo Classic 的 `Insert → Box` **尺寸写死**，`S` 缩放工具只改视觉不改碰撞体；必须用 SDF 指定 `<size>` |
+| 目标 | (2.8, 0.0) —— 直线必须经过箱子 |
+| 录制 | `/cmd_vel` `/amcl_pose` `/plan` `/local_costmap/costmap` |
+
+**放障碍的前提**：车已在原地（`/odom` x≈y≈0），且**不要按 `Reset World`** —— 那会把运行时
+spawn 的模型清掉。
+
+#### 结果：避障是「规划层」完成的，不是局部闪避
+
+分析每条全局路径在箱子区域（x∈0.7~1.3）的最大横向偏移：
+
+| 第几条 | 时刻 | 路径长度 | 点数 | 该区域 max\|y\| |
+|---|---|---|---|---|
+| 第 1 条 | 9.6 s | 3.97 m | 158 | **0.82 m** |
+| 第 2 条 | 10.6 s | 3.94 m | 157 | 0.79 m |
+| 第 3 条 | 11.7 s | 2.54 m | 101 | 0.21 m（车已绕过） |
+| 第 16 条 | 24.5 s | 0.38 m | 14 | 0.00 m |
+
+**第一条全局路径就已经绕开了** —— 因为 `global_costmap` 里除了 `static_layer`，还有
+**`obstacle_layer`（订阅 `/scan`）**。所以：
+
+> **「地图文件里没有」不等于「规划器不知道」** —— 激光扫到就会被标记进代价地图，
+> 然后**重规划**绕开，而不是靠局部临时闪避。
+
+#### 轨迹与代价量化
+
+实际轨迹：`(0,0) → (0.28,0.11) → (1.23,0.87) → (2.29,0.77) → (2.79,0.33)`
+
+```
+箱子中心 (1.0, 0)，尺寸 0.4  → 占 y ∈ [-0.2, +0.2]
+膨胀半径 0.55                → 高代价区边界 y = 0.2 + 0.55 = 0.75
+车实际走过                    → y = 0.87，正好在边界外侧 0.12 m
+```
+
+| 指标 | 值 |
+|---|---|
+| 直线距离 | 2.80 m |
+| **实际全局路径** | **3.97 m（+42%）** |
+| 实际行驶轨迹 | 3.37 m |
+| 轨迹相对首条路径的最大横向偏离 | 0.23 m（很贴路径） |
+| 原地转占比 | 0.0%（`RotateToGoal: 0` 后不再到点转向） |
+
+**绕一个 0.4 m 的箱子多走 1.17 m（42%）** —— 与 §20 中 `inflation_radius` 实验的结论一致：
+膨胀半径是绕行代价的直接来源。
+
+#### 两个待改进的发现
+
+| 现象 | 说明 |
+|---|---|
+| **避障时没有减速** | `\|v\|` 平均 0.263 m/s、最大 0.300（几乎满速通过箱子）。DWB 只负责"绕开"，不负责"靠近障碍时降速"。真实机器人需要「代价相关限速」或 `nav2_collision_monitor` |
+| **到点误差 0.33 m > 容差 0.25 m** | 终点 (2.79, 0.33)，目标 (2.80, 0)。若 action 显示 `SUCCEEDED`，说明 goal checker 的判定是"曾经进入过容差" |
+
+#### 三层避障的真实分工
+
+| 层 | 组件 | 数据来源 | 覆盖 | 实际观察到的作用 |
+|---|---|---|---|---|
+| 规划层 | `global_costmap` | `static_layer`(/map) + **`obstacle_layer`(/scan)** + inflation | 整图 | **本次绕行由它完成**（第一条路径已绕开） |
+| 控制层 | `local_costmap` | `voxel_layer`(/scan) | 3×3 m 滚动窗口 | 实时标记，供 DWB 否决碰撞轨迹 |
+| 轨迹评分 | DWB `BaseObstacle` | local costmap 代价 | 每条候选轨迹 | 否决压到障碍上的轨迹 |
+
+> **涉及文件**：`obstacle.sdf`
+
 ## 项目结构
 
 ```text
@@ -588,6 +718,12 @@ ros2/
 │   │   ├── CMakeLists.txt
 │   │   └── package.xml
 │   │
+│   ├── my_robot_tasks/               # Python 任务包（ament_python）
+│   │   ├── my_robot_tasks/
+│   │   │   ├── pose_monitor.py       # 订阅 /odom，定时汇报位置与累计里程
+│   │   │   ├── cmd_vel_repeater.py   # 一次性指令 → 持续指令流（rclpy 发布练习，链路上不启用）
+│   │   │   └── patrol.py             # BasicNavigator 巡逻任务脚本
+│   │   └── setup.py                  # entry_points 声明可执行脚本
 │   └── my_robot_description/         # 机器人描述、仿真与可视化
 │       ├── urdf/
 │       │   └── robot.urdf            # 两轮差速小车（含 inertial/collision、雷达、相机）
@@ -610,6 +746,7 @@ ros2/
 ├── tools/
 │   ├── bag_metrics.py                # 读 bag 输出导航指标（路径长度 / 速度 / 障碍距离）
 │   └── cmd_timeline.py               # 把 /cmd_vel 画成时间线，定位真停/原地转/前进的阶段
+├── obstacle.sdf                      # 动态避障实验用的 0.4 m 障碍物
 ├── DEFAULT_FASTDDS_PROFILES.xml      # Fast DDS 自定义 profile（data_sharing 配置）
 ├── .gitignore
 └── README.md
@@ -950,6 +1087,27 @@ ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose "{
 ros2 topic pub --rate 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.15}}"
 ```
 
+### 10. Python 任务脚本
+
+```bash
+# 编译 Python 包（很快，只是复制文件 + 生成入口脚本）
+cd ~/ros2
+colcon build --packages-select my_robot_tasks
+source install/setup.bash
+
+# ① 位置监视（只需要 /odom，Gazebo 在跑即可）
+ros2 run my_robot_tasks pose_monitor
+
+# ② 巡逻任务（需要 Gazebo + Nav2 全套）
+ros2 run my_robot_tasks patrol
+```
+
+> `pose_monitor` 也可以用假数据测，不需要 Gazebo：
+> ```bash
+> ros2 topic pub --rate 1 /odom nav_msgs/msg/Odometry "{
+>   pose: {pose: {position: {x: 1.0, y: 2.0, z: 0.0}}} }"
+> ```
+
 ## 环境准备与常用命令
 
 命令速查，避免每次重新翻找。
@@ -1095,6 +1253,13 @@ pgrep -a gzserver                           # 确认服务端还活着
   指令时间线一眼看出原地转全部集中在到点后的 3 秒，从而避免了两轮无效的参数调整。
 - 理解 `RotateToGoal.scale` 与 `yaw_goal_tolerance` 的耦合：关掉朝向对准后原地转
   21% → 0%、运动时长 −30%；但两者必须成对调整，否则目标永远不判定为到达。
+- 打通 Python 侧：创建 `ament_python` 包、用 `entry_points` 声明可执行脚本，
+  并掌握 rclpy 的订阅 / 发布 / 定时器 / 参数四种基本用法（与 C++ 一一对应）。
+- 能用 `nav2_simple_commander` 做任务级编排：`followWaypoints` 非阻塞 +
+  `isTaskComplete` 轮询 + `TaskResult` 判定，等待期间可插入业务逻辑。
+- 理解三层避障的真实分工：`obstacle_layer` 让「地图文件里没有的障碍」也能进入
+  全局规划并被**重规划**绕开，而不是靠局部临时闪避；绕行代价（+42% 路程）直接
+  由 `inflation_radius` 决定。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -1107,15 +1272,18 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] 激光雷达（`/scan`）与相机（`/camera/image_raw`）仿真
 - [x] 相机图像处理：cv_bridge + OpenCV 边缘检测
 - [x] 参数持久化（YAML + launch 加载）
-- [ ] IMU 传感器仿真
 - [x] rosbag2 录制与离线回放
 - [x] SLAM 建图（slam_toolbox）
 - [x] Nav2 导航框架实践（地图 + AMCL + 全局规划 + 局部控制）
 - [x] Nav2 参数调优：离线实验方法 + `inflation_radius` 对比实验
 - [x] 控制参数调优（controller / `velocity_smoother` 两级限幅）与 `FollowWaypoints` 多点巡航
 - [x] DWB critic 调优：定位到 `RotateToGoal` 是「原地转」的真正来源
-- [ ] IMU 传感器仿真与融合
-- [ ] rclpy 节点、单元测试、组件容器化部署
+- [x] rclpy 编程（`ament_python` 包 / 订阅发布定时器 / `nav2_simple_commander` 任务脚本）
+- [x] 动态避障实验（地图外障碍，验证三层避障分工）
+- [ ] 代价相关限速（靠近障碍自动降速）+ `nav2_collision_monitor` 独立急停
+- [ ] IMU 传感器仿真 + `robot_localization` 扩展卡尔曼融合
+- [ ] 单元测试（gtest / pytest）与组件容器化部署
+- [ ] 平滑器（`smoother_server`）与恢复行为（`behavior_server`）实操
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
 
 ## 调试经验（踩坑记录）
@@ -1163,6 +1331,10 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **累计型指标不归一化会得出相反结论** | 抖动 1.12 的 bag 比抖动 0.40 的更差？ | 相邻速度差之和要除以采样数；不归一化时长 bag 天然显得更差 |
 | **调参前先看现象发生在「哪一段」** | 连续两轮改 critic 权重完全无效 | 把 `/cmd_vel` 按 0.5 s 分桶画时间线（`tools/cmd_timeline.py`），发现原地转 100% 在到点之后 —— 中途根本没有，改中途权重当然没用 |
 | **`RotateToGoal` 与 `yaw_goal_tolerance` 必须成对改** | 只关 `RotateToGoal.scale` 后目标一直不成功 | 关掉朝向对准但朝向容差仍是 0.25 rad，车停在容差外 → goal checker 不判定到达 → BT 反复重试 |
+| **遥操作是「锁存」语义** | 按一次 `j` 车就一直左转，按一次 `i` 就一直直行 | `teleop_twist_keyboard` 以固定频率持续重发当前指令，直到按 `k`。这是遥控器的正常设计（真实摇杆不回中也是保持速度），不是 bug |
+| **心跳不能重复叠加** | 加了 repeater 之后，看门狗的「断流停车」失效 | repeater 持续刷新指令流，watchdog 永远等不到超时。一层心跳足够，重复叠加会让保护失效 |
+| **Gazebo GUI 改不了几何尺寸** | `Insert → Box` 放下的方块没法改大小 | GUI 的 `S`（Scale）只缩视觉、不改碰撞体。必须用 SDF 文件 + `spawn_entity.py` 指定 `<size>` |
+| **文档里的 `...` / `<xxx>` 是占位符** | 照抄 `map:=...` 后 launch 报 `No such file or directory: '...'` | 占位符必须替换成真实路径 |
 
 ## 开发记录
 
@@ -1171,7 +1343,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
-| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）** |
+| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s） |
 
 ## 说明
 
