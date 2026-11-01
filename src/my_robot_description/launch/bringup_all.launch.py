@@ -30,8 +30,12 @@ def generate_launch_description():
             'pkill -9 -x gzclient;',
             'pkill -9 -f "[n]av2";',
             'pkill -9 -f "[e]kf_node";',
-            'pkill -9 -x collision_monitor;',
-            'pkill -9 -x robot_state_publisher;',
+            'pkill -9 -f "[c]ollision_monitor";',
+            # 注意：Linux 进程名（comm）最多 15 字符，robot_state_publisher 是 21 字符，
+            # 实际叫 robot_state_pub，所以 pkill -x robot_state_publisher 永远匹配不到。
+            # 长名字一律改用 -f + 方括号（同时避免匹配到自己的命令行）。
+            'pkill -9 -f "[r]obot_state_publisher";',
+            'pkill -9 -f "[c]md_vel_watchdog";',
             'pkill -9 -f "[r]ed_target_detector";',
             'pkill -9 -f "[g]o_to_target";',
             # 等旧进程真正退出，再清它们留下的共享内存段
