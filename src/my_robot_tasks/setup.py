@@ -27,6 +27,7 @@ setup(
             'pose_monitor = my_robot_tasks.pose_monitor:main',
             'cmd_vel_repeater = my_robot_tasks.cmd_vel_repeater:main',
             'patrol = my_robot_tasks.patrol:main',
+            'odom_noise = my_robot_tasks.odom_noise:main',
         ],
     },
 )

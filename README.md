@@ -686,7 +686,7 @@ URDF 里加 `imu_link`（0.03³ 方块、0.02 kg）+ `<sensor type="imu">` + `li
 | `/odometry/filtered` | 306.9° | −3.3°（−1.1%） |
 | 融合 − odom | −0.6° | 几乎无差别 |
 
-#### 结论：**这个仿真里融合看不出收益**
+#### 基线实验（不注入误差）：融合看不出收益
 
 仿真中没有打滑 —— `/odom` 的角速度与 IMU **完全一致**（都是 0.4583 rad/s），
 `/odom` 的 yaw 本身误差只有 0.9%。IMU 没有任何「可纠正的误差」可做，融合结果自然等于 odom。
@@ -700,7 +700,41 @@ URDF 里加 `imu_link`（0.03³ 方块、0.02 kg）+ `<sensor type="imu">` + `li
 | **伪造 odom 噪声** | rclpy 节点给 `/odom` 的 yaw 加 5% 漂移，另发 `/odom_noisy` | 误差量可控、可重复 |
 | 给陀螺加零偏 | SDF 噪声 `<mean>` 设 0.02 rad/s | 看 odom 能否把漂移的 IMU 拉回来 |
 
-#### 排查实录：六个把结论带偏的坑
+#### 注入误差源：融合价值得到证明
+
+基线实验说明「odom 准的时候融合看不出收益」，那就**人为把 odom 弄坏**，看融合能不能救回来。
+
+**做法**：写 `odom_noise` 节点（rclpy），订阅 `/odom`，把角速度乘 1.10，
+并用**污染后的角速度重新积分 yaw**（保证 `twist` 与 `pose` 自洽），发到 `/odom_noisy`；
+再把 EKF 的 `odom0` 换成 `/odom_noisy`（`ekf_noisy.yaml`，其余配置完全不变）。
+
+```
+Gazebo /odom（准） ─┬──────────────────────────────────────┐
+                    └─▶ [odom_noise ×1.10] ─▶ /odom_noisy ─▶[EKF]─▶ /odometry/filtered
+Gazebo /imu（准）  ─────────────────────────────────────────▶[EKF]
+```
+
+**结果**（原地转，积分用 `header.stamp` 的仿真时间）：
+
+| 数据源 | 总转角 | 相对真实误差 |
+|---|---|---|
+| **IMU 积分（真实）** | **224.9°** | — |
+| `/odom`（未污染，作参照） | 224.9° | +0.0°（0.0%） |
+| **`/odom_noisy`（注入 10%）** | **247.5°** | **+22.6°（+10.0%）** |
+| **`/odometry/filtered`** | **222.9°** | **−2.0°（−0.9%）** |
+
+**偏差消除 91%，精度提升 11 倍。** EKF 只看到「打了 10% 折扣的假轮速」和「真实的 IMU」，
+却输出了误差 0.9% 的角度。时间线上误差**不随时间累积** ——
+轮式里程计的偏差会一路累加，IMU 的角速度不会，这正是融合的价值所在。
+
+**残余 0.9% 的解读**：按协方差之比（25000 : 1），融合结果本应几乎完全等于 IMU。
+实测说明 EKF 实际仍给了 odom 约 9% 的权重 —— 这是**过程噪声矩阵与两个传感器采样率
+（100 Hz vs 50 Hz）耦合**的结果。「协方差之比」只是权重的量级估计，不是精确公式。
+
+> **涉及文件**：`src/my_robot_tasks/my_robot_tasks/odom_noise.py`、
+> `src/my_robot_description/config/ekf_noisy.yaml`
+
+#### 排查实录：八个把结论带偏的坑
 
 这一节花了十几轮才定位，**过程比结论更有价值**。
 
@@ -712,6 +746,8 @@ URDF 里加 `imu_link`（0.03³ 方块、0.02 kg）+ `<sensor type="imu">` + `li
 | 4 | **丢帧让积分虚高** | `/odom` 的 `∫ωdt` 与自身 `yaw` 差 12° | 积分前先验 Hz（应 50/100/10）；`trapz` 遇丢帧会按匀速补，必须跳过间隔过大的段 |
 | 5 | **不做自洽性检查** | 直接采信了不可能的数据 | 同一消息内 `∫twist.ω dt` 应等于 `Δpose.yaw`；对不上说明数据或算法有问题 |
 | 6 | **把「指令 vs 实际」当成「轮式 vs 真值」** | 误判「有 8% 打滑」 | 指令 0.5 → 实际 0.4583 是**指令跟踪误差**；判断里程计漂移要比 `/odom` 与 IMU，而两者一致 |
+| 7 | **时间轴运算用了 bag 记录时间** | `∫ωdt` 与 `Δyaw` 差 12°、5.4°，反复怀疑数据 | 必须用 **`header.stamp`（仿真时间）**。记录时间受主机负载影响、与仿真时间不同步；改用仿真时间后自洽性立刻恢复到 ±0.2° |
+| 8 | **文件名与 `entry_points` 不一致** | `ros2 run` 报 `ModuleNotFoundError: my_robot_tasks.odom_noise` | 文件存成了 `dom_noise.py`（少一个 o）。`entry_points` 冒号右边是 `包名.文件名:函数名`，必须与磁盘文件名**完全一致** |
 
 > **可信判据 = 数据体检三条**：三个话题 Hz 符合预期（50 / 100 / 10）、
 > `Publisher count` 为 1、自洽性误差在几度以内。三条都满足，结论才可信。
@@ -791,7 +827,8 @@ ros2/
 │   │   ├── my_robot_tasks/
 │   │   │   ├── pose_monitor.py       # 订阅 /odom，定时汇报位置与累计里程
 │   │   │   ├── cmd_vel_repeater.py   # 一次性指令 → 持续指令流（rclpy 发布练习，链路上不启用）
-│   │   │   └── patrol.py             # BasicNavigator 巡逻任务脚本
+│   │   │   ├── patrol.py             # BasicNavigator 巡逻任务脚本
+│   │   │   └── odom_noise.py         # 给 /odom 注入角速度偏差，产出 /odom_noisy（融合实验用）
 │   │   └── setup.py                  # entry_points 声明可执行脚本
 │   └── my_robot_description/         # 机器人描述、仿真与可视化
 │       ├── urdf/
@@ -805,7 +842,8 @@ ros2/
 │       │   ├── slam_toolbox.yaml     # SLAM 参数
 │       │   ├── nav2_params.yaml      # Nav2 参数（已按 0.4×0.3 m 小车调整）
 │       │   ├── nav2_params.baseline.yaml  # 调参实验的基线备份
-│       │   └── ekf.yaml              # robot_localization EKF 融合配置
+│       │   ├── ekf.yaml              # robot_localization EKF 融合配置
+│       │   └── ekf_noisy.yaml        # 同上，但 odom0 指向 /odom_noisy（融合价值实验）
 │       ├── rviz/
 │       │   └── view.rviz             # 预配置的 RViz 布局
 │       ├── CMakeLists.txt
@@ -1205,6 +1243,17 @@ ros2 topic hz /odometry/filtered    # ~10 Hz（受 /clock 更新率限制）
 > **`ekf_node` 启动后一句话都不打印，这是正常的** —— 判断它是否工作只能看
 > `/odometry/filtered` 话题是否存在。没输出不等于卡住，不要急着 Ctrl+C。
 
+**融合价值实验**（把 odom 弄坏，看融合能否纠正）：
+
+```bash
+# ① 角速度 ×1.10 的假里程计：/odom -> /odom_noisy
+ros2 run my_robot_tasks odom_noise
+
+# ② EKF 改用 ekf_noisy.yaml（其中 odom0: /odom_noisy）
+ros2 run robot_localization ekf_node --ros-args \
+  --params-file $(ros2 pkg prefix my_robot_description)/share/my_robot_description/config/ekf_noisy.yaml
+```
+
 ## 环境准备与常用命令
 
 命令速查，避免每次重新翻找。
@@ -1385,7 +1434,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] 动态避障实验（地图外障碍，验证三层避障分工）
 - [ ] 代价相关限速（靠近障碍自动降速）+ `nav2_collision_monitor` 独立急停
 - [x] IMU 传感器仿真 + `robot_localization` 扩展卡尔曼融合（结论：仿真中 odom 已足够准，融合收益测不出）
-- [ ] 注入 odom 误差源后重做融合实验（伪造 odom 漂移 / 降低车轮摩擦 / 陀螺零偏）
+- [x] 注入 odom 误差源后重做融合实验：偏差 10.0% → 融合后 0.9%（消除 91%，精度提升 11 倍）
 - [ ] 单元测试（gtest / pytest）与组件容器化部署
 - [ ] 平滑器（`smoother_server`）与恢复行为（`behavior_server`）实操
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
@@ -1450,7 +1499,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
-| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题 |
+| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2° |
 
 ## 说明
 
