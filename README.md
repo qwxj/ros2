@@ -756,6 +756,11 @@ Gazebo /imu（准）  ───────────────────�
 | **视觉目标必须落在视野锥内且无遮挡** | 检测器一条不发，任务节点干等 | 相机水平 FOV 60° → 只有 ±30°。放目标前用 `/scan` 确认正前方最近距离就是它 |
 | **用被测函数算期望值 → 测试永远绿** | 测试全过，但函数返回 `(999,999)` 也不会红 | 期望值必须来自被测代码之外：手算、数学约束、几何常识、解析解、往返自洽 |
 | **拿集成测试当单元测试用** | 60 秒一次，红了只知道"车没动" | 把数学抽成纯函数，0.14 秒筛一遍；集成测试只负责验证"接线" |
+| **`pkill -f` 匹配到自己的命令行** | `bash -c 'pkill -9 -f gzserver; ...'` **把自己 -9 掉**，`exit code -9` | 模式首字母加方括号 `[g]zserver`；或改用 `pkill -x 进程名`（不匹配命令行） |
+| **`pkill` 自匹配的根源是整条命令行** | 参数改对了还自杀，因为 `echo` 的提示语里写了 `gzclient` | 任何位置出现进程名都算。用 `-x` 或让提示语不含进程名 |
+| **`;` 掩盖前一条命令的失败** | `pkill` 因畸形方括号失败，`echo` 照跑，日志显示"已关闭"但进程还在 | 用 `&&` / `||`；日志语句不能无条件执行 |
+| **launch 是异步的** | `cleanup` 还没 `sleep 2` 完，`gazebo` 已经开始起 | `ExecuteProcess` 不等结束，必须用 `TimerAction` 串行化 |
+| **`ros2 node list` 空但 `topic hz` 正常** | `lifecycle get` 报 `Node not found`，实际节点都在 | 数据面直连、元数据面走 daemon。`ros2 daemon stop && start` 或加 `--no-daemon` |
 
 > **可信判据 = 数据体检三条**：三个话题 Hz 符合预期（50 / 100 / 10）、
 > `Publisher count` 为 1、自洽性误差在几度以内。三条都满足，结论才可信。
@@ -1220,6 +1225,179 @@ assert p == pytest.approx((1.0, -0.5), abs=1e-9)
 > **涉及文件**：`src/my_robot_tasks/my_robot_tasks/geometry.py`、
 > `src/my_robot_tasks/test/test_projection.py`
 
+### 29. 一键启动：launch 参数化与编排
+
+#### 痛点
+
+之前每次实验要开 **7 个终端、敲 12 条命令、等 3 次"凭感觉"的时长**：
+
+```bash
+pkill -9 -f gzserver; pkill -9 -f gzclient; pkill -9 -f nav2
+pkill -9 -f collision_monitor; pkill -9 -f robot_state_publisher
+ros2 daemon stop; sleep 3
+rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_*
+export DISPLAY=:0 && ros2 launch my_robot_description gazebo.launch.py
+# 等 15 秒；pkill -f gzclient
+ros2 launch nav2_bringup bringup_launch.py \
+  map:=$HOME/ros2/maps/my_map.yaml \
+  params_file:=$HOME/ros2/src/my_robot_description/config/nav2_params.yaml \
+  use_sim_time:=true use_composition:=False
+# 等 Managed nodes are active；再等 10 秒
+ros2 service call /set_initial_pose nav2_msgs/srv/SetInitialPose ...
+```
+
+换台机器、换个目录、隔一天回来 —— 全都要重来，**漏一条就出怪问题**（`/odom` 消失、Nav2 心跳超时全栈停用）。
+
+#### 目标：一条命令
+
+```bash
+ros2 launch my_robot_description bringup_all.launch.py
+```
+
+#### 四个阶段
+
+| 阶段 | 动作 | 时机 | 实现 |
+|---|---|---|---|
+| 0 | 清残留进程 + 清 `/dev/shm/fastrtps_*` | 立即 | `ExecuteProcess` |
+| 1 | Gazebo（含 Gazebo 的 `gazebo.launch.py`） | +4 s | `IncludeLaunchDescription` + `TimerAction` |
+| 2 | Nav2（含 `nav2_bringup` 的 `bringup_launch.py`） | +12 s | 同上 |
+| 3 | 杀 `gzclient` 省 CPU（可关） | +15 s | `TimerAction` + `IfCondition` |
+
+#### 三个核心机制
+
+**① `ExecuteProcess` —— launch 里能跑任意 shell 命令**
+
+```python
+ExecuteProcess(cmd=['bash', '-c', 'pkill ...; sleep 2; rm -f /dev/shm/fastrtps_*'], output='screen')
+```
+
+`cmd` 是**列表**；`['bash','-c','xxx']` 才能用 `;`、`&&`、`$()`。`output='screen'` 把输出打到终端。
+
+**② ⚠️ launch 是异步的 —— 这是第一个大坑**
+
+```python
+return LaunchDescription([
+    cleanup,     # ← 不会等它跑完
+    gazebo,      # ← 立刻开始起
+])
+```
+
+`ExecuteProcess` 启动进程就返回，不等结束。必须用 `TimerAction` 串行化：
+
+```python
+TimerAction(period=4.0,  actions=[gazebo]),   # 等清理跑完
+TimerAction(period=12.0, actions=[nav2]),     # 等 Gazebo spawn 完车、/scan 有数据
+```
+
+> **手动操作时"感觉没事"，是因为敲命令本身是串行的。**
+> 从"手动"到"脚本"最容易忽略这个差异。
+
+**③ `PathJoinSubstitution` + `FindPackageShare` —— 不写死路径**
+
+```python
+map_yaml = PathJoinSubstitution([
+    FindPackageShare('my_robot_description'), 'maps', 'my_map.yaml'])
+nav2_params = PathJoinSubstitution([
+    FindPackageShare('my_robot_description'), 'config', 'nav2_params.yaml'])
+
+IncludeLaunchDescription(
+    PythonLaunchDescriptionSource(...bringup_launch.py),
+    launch_arguments={'map': map_yaml, 'params_file': nav2_params,
+                      'use_sim_time': 'true', 'use_composition': 'False'}.items(),
+)
+```
+
+`launch_arguments` 等价于命令行的 `key:=value`；`.items()` 不能漏。
+
+**前置条件**：地图必须搬进包里（见 §18），否则 `FindPackageShare` 找不到。
+搬迁用 `git mv`，git 显示 `rename {maps => ...}/my_map.pgm (100%)`，历史完整保留。
+
+#### 实测时间线
+
+| 时刻（launch 后） | 事件 |
+|---|---|
+| ~1 s | `[bringup] 清理完成，残留 fastrtps 段: 0` |
+| ~5 s | Gazebo 起来、`Successfully spawned entity [my_car]` |
+| ~7 s | `diff_drive` 订阅 `/cmd_vel_final` |
+| ~12 s | Nav2 十个进程启动 |
+| ~15 s | `[bringup] 已关闭 Gazebo GUI（headless）` |
+| ~15 s | `map_server` / `amcl` 配置完成，地图加载 110×81 @ 0.05 |
+| ~15.6 s | `lifecycle_manager_localization: Managed nodes are active` |
+| ~18 s | `lifecycle_manager_safety` / `lifecycle_manager_navigation` 全部 active |
+
+**18 秒 → 全栈就绪。**
+
+> 顺带收获：12 秒延时让 AMCL 激活时 `/scan` 与 `/map` 都已就绪，
+> `set_initial_pose: true` 的自动初始化**这次真的生效了**（日志里 `Setting pose (...): 0.000 0.000 0.000`）。
+
+#### 排查实录：四个坑
+
+**① `pkill -f` 会匹配到自己的命令行 —— 两次**
+
+```python
+cmd = ['bash', '-c', 'pkill -9 -f gzserver; pkill -9 -f nav2; ...']
+#                             ↑ 这条 bash 的命令行里就有 "gzserver"
+```
+
+`pkill -f` 匹配**完整命令行**，所以它找到了自己，**把自己 -9 掉**：
+
+```
+[ERROR] [bash-1]: process has died [pid 3217, exit code -9, cmd 'bash -c pkill -9 -f gzserver; ...']
+```
+
+**修法：模式首字母加方括号**（`[g]zserver`），正则仍匹配 `gzserver`，但自己的命令行里是 `[g]zserver`，不含连续子串 → 不匹配自己。
+
+**第二次踩得更隐蔽**：`pkill` 参数改对了，但 **`echo` 的提示文字里写了 `gzclient`**：
+
+```bash
+bash -c pkill -f "[g]zclient" && echo "[bringup] 已关闭 gzclient（headless 模式）"
+#                                            ↑ 这里有字面量 gzclient，照样自匹配
+```
+
+**根因是"整条命令行里任何地方出现那个进程名都算"。** 两种彻底修法：
+
+| 修法 | 说明 |
+|---|---|
+| **`pkill -x 名字`** | `-x` 匹配**进程名**而非命令行，`bash` 永远不会匹配 `gzclient` |
+| 提示语不写进程名 | 改成"已关闭 Gazebo GUI" |
+
+**能用 `-x` 的前提**：目标进程的进程名就是它自己。`gzserver` / `gzclient` / `collision_monitor` / `robot_state_publisher` 都可以；
+但 `ros2 run` / `ros2 launch` 起的 Python 节点进程名都是 `python3`，**只能用 `-f` + 方括号**。
+
+**② `;` 会掩盖前面的失败 —— 日志说假话**
+
+```bash
+pkill -f [gzclient; echo "[bringup] 已关闭 gzclient"   # [gzclient 是畸形方括号
+```
+`pkill` 报 `Unmatched [, [^, [:, [., or [=` 失败，但 **`;` 让后面的 echo 照跑** → 日志显示"已关闭"，
+实测 `pgrep -c gzclient` 是 **1**。
+
+**修法：`&&` / `||` 让日志说真话**
+
+```bash
+pkill -9 -x gzclient && echo "已关闭 Gazebo GUI" || echo "警告：没杀掉"
+```
+
+**③ `ros2 daemon` 缓存陈旧 —— `Node not found` 不可信**
+
+```
+ros2 node list          → 空
+ros2 lifecycle get /amcl → Node not found
+但 ros2 topic hz /odom   → 47.8 Hz 正常
+```
+
+**数据面（topic hz / echo）自己建节点直连，不经过 daemon；元数据面（node list / lifecycle get）要问 daemon。**
+daemon 缓存过期就出现"进程活着但节点找不到"。
+
+**修法**：`ros2 daemon stop && ros2 daemon start`，或给命令加 `--no-daemon`。
+
+**④ 看 `status: 4` 别当成失败**
+
+`STATUS_SUCCEEDED = 4`。这个坑详见 §27。
+
+> **涉及文件**：`src/my_robot_description/launch/bringup_all.launch.py`、
+> `src/my_robot_description/launch/gazebo.launch.py`、`src/my_robot_description/launch/gazebo.launch.py`
+
 ## 项目结构
 
 ```text
@@ -1318,6 +1496,9 @@ ros2/
 │       │   └── collision_monitor.yaml # 第四层安全：前方障碍降速 / 急停区域
 │       ├── rviz/
 │       │   └── view.rviz             # 预配置的 RViz 布局
+│       ├── launch/
+│       │   ├── gazebo.launch.py       # 仿真环境（Gazebo + 传感器 + 看门狗 + collision_monitor）
+│       │   └── bringup_all.launch.py  # 一键启动：清理 -> Gazebo -> Nav2 -> 杀 GUI
 │       ├── maps/                     # SLAM 产出的地图（.pgm + .yaml，体积小可入库）
 │       │   ├── my_map.pgm
 │       │   └── my_map.yaml
@@ -1795,6 +1976,45 @@ python3 -m pytest test/test_projection.py -v
 **验证测试真有效的方法**（变异测试）：临时把 `geometry.py` 里的
 `R_OPTICAL_TO_LINK` 加个 `.T`，重跑应当有 3 条变红。
 
+### 15. 一键启动（推荐）
+
+```bash
+cd ~/ros2
+colcon build && source install/setup.bash
+export DISPLAY=:0
+
+ros2 launch my_robot_description bringup_all.launch.py
+```
+
+**一个终端、一条命令、约 18 秒后全栈就绪**（清理 → Gazebo → Nav2 → 关闭 GUI）。
+
+## ⛳ 成功判据：三个 `Managed nodes are active`
+
+```
+[lifecycle_manager_localization] Managed nodes are active
+[lifecycle_manager_safety]       Managed nodes are active
+[lifecycle_manager_navigation]   Managed nodes are active
+```
+
+## 可选参数
+
+```bash
+# 保留 Gazebo GUI（默认 15 秒后杀掉省 CPU）
+ros2 launch my_robot_description bringup_all.launch.py headless:=false
+```
+
+> **会看到一条 `[ERROR] [gzclient-3]: process has died`** —— 那是 launch 如实报告
+> "我管的子进程被 pkill 杀掉了"，属于**正常现象**，不是故障。
+
+## 启动后验证
+
+```bash
+ros2 topic hz /odom                # ~50
+ros2 topic hz /scan                # ~10
+ros2 topic hz --no-daemon /odom    # 若 node list 为空，加 --no-daemon 绕开 daemon 缓存
+pgrep -c -x gzclient               # 0（headless 模式）
+```
+
 ## 环境准备与常用命令
 
 命令速查，避免每次重新翻找。
@@ -1973,6 +2193,12 @@ pgrep -a gzserver                           # 确认服务端还活着
 - 掌握单元测试的**期望值来源**：手算、数学约束（正交 / 模长 / det）、几何常识、
   教科书解析解、以及**往返自洽**（不需要知道正确答案的 oracle）。
 - 理解**变异测试**的价值：只看到绿灯不会相信测试，故意改坏代码看它变红才会。
+- 掌握 launch 的**编排能力**：`ExecuteProcess` 执行任意命令、`TimerAction` 串行化
+  （launch 是异步的）、`IncludeLaunchDescription` 复用别人（和自己）的 launch 并传参。
+- 掌握 launch 的**参数化**：`DeclareLaunchArgument` + `LaunchConfiguration` 做命令行开关，
+  `PathJoinSubstitution` + `FindPackageShare` 彻底消灭写死的绝对路径（换机器不用改）。
+- 把"7 个终端 / 12 条命令 / 3 次凭感觉等待"压缩成**一条命令 + 18 秒**，
+  而且每次行为一致 —— 这是"能跑"到"可复现"的分界线。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -2000,6 +2226,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [ ] 平滑器（`smoother_server`）与恢复行为（`behavior_server`）实操
 - [x] 相机进入导航链路：红块检测 → 像素反投影到 map → Nav2 导航（实测投影误差 2~3 cm）
 - [x] 单元测试：抽出 `geometry.py`（零 ROS 依赖）+ 13 个 pytest 用例，0.14 秒跑完
+- [x] launch 参数化与一键启动（`bringup_all.launch.py`，一条命令 18 秒全栈就绪）
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
 
 ## 调试经验（踩坑记录）
@@ -2062,7 +2289,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
-| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑭ 视觉目标导航：`red_target_detector`（红块→像素反投影→map 坐标，投影误差 2~3 cm）+ `go_to_target`（多帧收敛 + 自适应 standoff + BasicNavigator）；实测车 (0,0)→(0.31,-0.04)、距目标 0.209 m < 容差 0.25、`status=4 SUCCEEDED`；修掉 `isTaskComplete()` 在回调里二次 spin、`use_sim_time` 未开、目标落入膨胀区三个问题<br>⑮ 单元测试：把纯几何计算从 ROS 节点抽成 `geometry.py`，写 13 个 pytest 用例（光学系→车体旋转、四元数、像素反投影、地面求交、双向往返），0.14 秒全部通过；建立「期望值必须来自被测代码之外」的 5 类来源与变异测试验证法 |<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
+| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑭ 视觉目标导航：`red_target_detector`（红块→像素反投影→map 坐标，投影误差 2~3 cm）+ `go_to_target`（多帧收敛 + 自适应 standoff + BasicNavigator）；实测车 (0,0)→(0.31,-0.04)、距目标 0.209 m < 容差 0.25、`status=4 SUCCEEDED`；修掉 `isTaskComplete()` 在回调里二次 spin、`use_sim_time` 未开、目标落入膨胀区三个问题<br>⑮ 单元测试：把纯几何计算从 ROS 节点抽成 `geometry.py`，写 13 个 pytest 用例（光学系→车体旋转、四元数、像素反投影、地面求交、双向往返），0.14 秒全部通过；建立「期望值必须来自被测代码之外」的 5 类来源与变异测试验证法<br>⑯ launch 参数化：`maps/` 用 `git mv` 搬进 `my_robot_description` 包（CMakeLists 加 `maps`）并同步更新 README 全部路径；新增 `bringup_all.launch.py`（`ExecuteProcess` 清理 / `TimerAction` 分阶段 / `IncludeLaunchDescription` 接 Nav2 / `PathJoinSubstitution` 免绝对路径 / `headless` 参数），把「7 终端 12 命令 3 次凭感觉等待」压成一条命令、18 秒全栈就绪；排查 `pkill -f` 两次自匹配（含 echo 文本里出现进程名）、`;` 掩盖失败、launch 异步执行、`ros2 daemon` 缓存陈旧四个坑 |<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
 
 ## 说明
 
