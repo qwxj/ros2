@@ -2392,7 +2392,7 @@ ros2 launch my_robot_description bringup_all.launch.py
 
 **一个终端、一条命令、约 18 秒后全栈就绪**（清理 → Gazebo → Nav2 → 关闭 GUI）。
 
-## ⛳ 成功判据：三个 `Managed nodes are active`
+#### ⛳ 成功判据：三个 `Managed nodes are active`
 
 ```
 [lifecycle_manager_localization] Managed nodes are active
@@ -2400,7 +2400,7 @@ ros2 launch my_robot_description bringup_all.launch.py
 [lifecycle_manager_navigation]   Managed nodes are active
 ```
 
-## 可选参数
+#### 可选参数
 
 ```bash
 # 保留 Gazebo GUI（默认 15 秒后杀掉省 CPU）
@@ -2410,7 +2410,7 @@ ros2 launch my_robot_description bringup_all.launch.py headless:=false
 > **会看到一条 `[ERROR] [gzclient-3]: process has died`** —— 那是 launch 如实报告
 > "我管的子进程被 pkill 杀掉了"，属于**正常现象**，不是故障。
 
-## 启动后验证
+#### 启动后验证
 
 ```bash
 ros2 topic hz /odom                # ~50
