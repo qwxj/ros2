@@ -636,7 +636,7 @@ spawn 的模型清掉。
 
 | 现象 | 说明 |
 |---|---|
-| **避障时没有减速** | `\|v\|` 平均 0.263 m/s、最大 0.300（几乎满速通过箱子）。DWB 只负责"绕开"，不负责"靠近障碍时降速"。真实机器人需要「代价相关限速」或 `nav2_collision_monitor` |
+| ~~避障时没有减速~~ **（已在 §26 修正）** | 那次是**侧向通过**（箱子在 90° 方向、横向 0.87 m），本来就不该降速。而且 DWB 其实有**内在的代价感知降速**：靠近障碍时高速轨迹被否决，只能选低速轨迹（见 §26 实测 0.30 → 0.016 m/s） |
 | **到点误差 0.33 m > 容差 0.25 m** | 终点 (2.79, 0.33)，目标 (2.80, 0)。若 action 显示 `SUCCEEDED`，说明 goal checker 的判定是"曾经进入过容差" |
 
 #### 三层避障的真实分工
@@ -748,11 +748,172 @@ Gazebo /imu（准）  ───────────────────�
 | 6 | **把「指令 vs 实际」当成「轮式 vs 真值」** | 误判「有 8% 打滑」 | 指令 0.5 → 实际 0.4583 是**指令跟踪误差**；判断里程计漂移要比 `/odom` 与 IMU，而两者一致 |
 | 7 | **时间轴运算用了 bag 记录时间** | `∫ωdt` 与 `Δyaw` 差 12°、5.4°，反复怀疑数据 | 必须用 **`header.stamp`（仿真时间）**。记录时间受主机负载影响、与仿真时间不同步；改用仿真时间后自洽性立刻恢复到 ±0.2° |
 | 8 | **文件名与 `entry_points` 不一致** | `ros2 run` 报 `ModuleNotFoundError: my_robot_tasks.odom_noise` | 文件存成了 `dom_noise.py`（少一个 o）。`entry_points` 冒号右边是 `包名.文件名:函数名`，必须与磁盘文件名**完全一致** |
+| **`ros2 run` 起来了但什么也不干** | `collision_monitor` 无订阅、无发布，像"没工作" | 它是 **Lifecycle 节点**，日志里写着 `Waiting on external lifecycle transitions to activate`。必须 `ros2 lifecycle set ... configure/activate`，或交给 `lifecycle_manager` |
+| **矩形多边形的角落比正前方更早触发** | 前向 ±30° 最近距离 0.417 m，但 0.28 m 的急停区已经触发 | 矩形四角 `(0.28, ±0.22)` 距车心 0.356 m，斜前方 40~45° 的点先落进去。统计"最近距离"时要考虑角度 |
+| **录 bag 前没确认目录创建** | 做完整套实验，最后发现没有任何新 bag | `ros2 bag record` 后必须看到 `Recording...`，并另开终端 `ls -ld bags/xxx` 确认目录存在、结束后 `du -sh` 确认不是 0 |
 
 > **可信判据 = 数据体检三条**：三个话题 Hz 符合预期（50 / 100 / 10）、
 > `Publisher count` 为 1、自洽性误差在几度以内。三条都满足，结论才可信。
 
 > **涉及文件**：`src/my_robot_description/urdf/robot.urdf`、`src/my_robot_description/config/ekf.yaml`
+
+### 26. 第四层安全：`nav2_collision_monitor` 独立急停与降速
+
+§24 曾把「绕箱时 0.263 m/s 满速通过」当成安全缺口。接入 `collision_monitor` 后才发现：
+**那次是侧向通过（箱子在 90° 方向），本来就不该降速**。真正的缺口是「正前方突然出现障碍」。
+
+#### 控制链：四层
+
+```
+DWB ─▶ /cmd_vel ─▶ watchdog ─▶ /cmd_vel_safe ─▶ collision_monitor ─▶ /cmd_vel_final ─▶ 差速插件
+       ↑指令源         ↑数据流心跳                ↑物理距离
+```
+
+| 层 | 检查什么 | 保护对象 |
+|---|---|---|
+| `cmd_vel_watchdog` | 指令源还活着吗（0.5 s 无指令就停） | 遥控端崩溃 |
+| **`collision_monitor`** | **车头前方有没有东西**（`/scan`） | **撞上去** |
+
+**为什么放最末端**：它必须看到**最终**要发给电机的速度，才能保证"无论上游谁发疯，最后都过一遍急停检查"。
+所以 URDF 里差速插件的 remap 从 `cmd_vel_safe` 改成了 `cmd_vel_final` —— **代价是 `collision_monitor` 不跑车就完全不动**（安全层不可绕过）。
+
+#### 配置要点
+
+```yaml
+collision_monitor:
+  ros__parameters:
+    base_frame_id: base_footprint
+    odom_frame_id: odom
+    cmd_vel_in_topic: cmd_vel_safe
+    cmd_vel_out_topic: cmd_vel_final
+    source_timeout: 2.0          # 激光断流也停车
+    stop_pub_timeout: 2.0
+    polygons: ["PolygonStop", "PolygonSlow"]
+
+    PolygonStop:                 # 前方 0.28 m 内有障碍 → 输出零
+      type: polygon
+      points: [0.28, 0.22, 0.28, -0.22, -0.10, -0.22, -0.10, 0.22]
+      action_type: stop
+
+    PolygonSlow:                 # 前方 0.70 m 内 → 速度 ×0.4
+      type: polygon
+      points: [0.70, 0.35, 0.70, -0.35, -0.20, -0.35, -0.20, 0.35]
+      action_type: slowdown
+      slowdown_ratio: 0.4
+
+    observation_sources: ["scan"]
+    scan: {type: scan, topic: /scan, enabled: true}
+```
+
+`points` 是**扁平数组** `[x1,y1, x2,y2, ...]`，相对 `base_footprint`，x 向前、y 向左。
+
+> **`state_topic` 在 Humble 1.1.20 里不存在**（我一开始凭印象写了，实测 `ros2 param get` 报 `Parameter not set`）。
+> 这个模块没有状态话题，**可观测性就是"看 `/cmd_vel_final` 的速度变没变"**，外加 `/polygon_stop` `/polygon_slowdown` 可在 RViz 里可视化。
+
+#### 它是 Lifecycle 节点，必须激活
+
+```
+ros2 run nav2_collision_monitor collision_monitor ...
+#   → "Waiting on external lifecycle transitions to activate"
+#   → 停在 unconfigured，不订阅不发布，看起来像"没工作"
+```
+
+三种激活方式：
+
+| 方式 | 命令 |
+|---|---|
+| 手动（调试用） | `ros2 lifecycle set /collision_monitor configure` 然后 `activate` |
+| **交给 lifecycle_manager（采用）** | 见下 |
+| 加进 Nav2 的 `lifecycle_manager_navigation.node_names` | 会与 Nav2 绑定，不开 Nav2 时失效 |
+
+`gazebo.launch.py` 里的做法：
+
+```python
+        Node(
+            package='nav2_collision_monitor', executable='collision_monitor',
+            name='collision_monitor',
+            parameters=[collision_params, {'use_sim_time': True}],
+            output='screen',
+        ),
+        # 延迟 10 秒：等车 spawn 出来、TF 与 /scan 就绪，否则 activate 失败
+        TimerAction(period=10.0, actions=[
+            Node(
+                package='nav2_lifecycle_manager', executable='lifecycle_manager',
+                name='lifecycle_manager_safety',
+                parameters=[{'use_sim_time': True, 'autostart': True,
+                             'node_names': ['collision_monitor']}],
+                output='screen',
+            ),
+        ]),
+```
+
+#### 三组实验
+
+**① 直线撞击（手动发 0.15 m/s，正前方 1.74 m 有方块）**
+
+| 项 | 设计值 | 实测 | 判定 |
+|---|---|---|---|
+| slowdown 触发距离 | 0.70 m | 0.698 → 0.649 m | ✅ |
+| stop 触发距离 | 0.28 m | 0.293 → 0.265 m | ✅ |
+| `slowdown_ratio` | 0.40 | **0.40**（精确到采样） | ✅ |
+| 边界抖动 | 无 | 全程只有 2 次速度突变 | ✅ |
+
+三段时长：0.150 m/s 持续 7.7 s → 0.060 m/s 持续 7.2 s → 0.000 m/s。
+
+**② 导航绕行（箱子在侧方）**
+
+干预 **0 次**，`ratio` 全程 1.00。因为绕过箱子时它在正侧方（y≈0.87 m），
+乘以 `PolygonStop` 的 y 范围 ±0.22 之外 —— **这是正确行为，不是失效**。
+
+**③ 动态障碍（导航途中在前方 0.7 m 扔箱子）**
+
+```
+t=0.9 s  箱子出现（前向距离 1.73 → 0.66 m）
+         同一采样点内  cmd 0.300 → final 0.120    ← ×0.40，<50 ms 反应
+```
+
+| 指标 | 无箱子 | 有箱子 | 变化 |
+|---|---|---|---|
+| 降速占比 | 0% | **35.9%** | — |
+| 急停占比 | 0% | **4.4%（≈1.5 s）** | — |
+| 前向最小距离 | 0.876 m | **0.352 m** | — |
+| 轨迹长度 | 3.38 m | 4.36 m | +29% |
+| **导航总时长** | 30.1 s | **59.6 s** | **+98%** |
+
+**代价量化：多花 30 秒（+98%），换"没撞上突然出现的箱子"。**
+
+#### 修正：DWB 其实会减速
+
+§24 写过「DWB 只负责绕开，不负责靠近障碍时降速」—— **这是错的**。动态障碍实验里 Nav2 自己的输出：
+
+```
+t=2.5s  0.174 → t=5.0s  0.111 → t=10.0s  0.047 → t=15.0s  0.016
+```
+
+靠近障碍时，**所有高速候选轨迹都会被 BaseObstacle 否决**，DWB 只能选低速的可行轨迹 ——
+这叫**内在的代价感知降速**（implicit cost-aware slowdown），不是显式的限速规则。
+
+所以两者是互补的：
+
+| 组件 | 视角 | 行为 |
+|---|---|---|
+| DWB | 规划 | 会绕、会因"高速轨迹全被否"而减速，但可能贴得很近 |
+| `collision_monitor` | 安全 | 不管规划多好，太近就乘系数或归零 |
+
+#### 一个反直觉的细节：矩形多边形的**角落先触发**
+
+首次急停发生时，前向 ±30° 内的最近距离是 **0.417 m**，而 stop 多边形只到 0.28 m。原因：
+
+```
+多边形角落 (0.28, 0.22) → 距车心 0.356 m
+车斜着接近时，激光点从 40~45° 方向先落入角落区域
+    点 (0.21, 0.21)：距离仅 0.30 m，但 x=0.21 ≤ 0.28 → 已触发
+```
+
+**"正前方 0.28 m" 实际等于"任何方向进入这个矩形"，斜前方会更早触发。** 窄通道场景要留意这点。
+
+> **涉及文件**：`src/my_robot_description/config/collision_monitor.yaml`、
+> `src/my_robot_description/launch/gazebo.launch.py`、`src/my_robot_description/urdf/robot.urdf`
 
 ## 项目结构
 
@@ -843,7 +1004,8 @@ ros2/
 │       │   ├── nav2_params.yaml      # Nav2 参数（已按 0.4×0.3 m 小车调整）
 │       │   ├── nav2_params.baseline.yaml  # 调参实验的基线备份
 │       │   ├── ekf.yaml              # robot_localization EKF 融合配置
-│       │   └── ekf_noisy.yaml        # 同上，但 odom0 指向 /odom_noisy（融合价值实验）
+│       │   ├── ekf_noisy.yaml        # 同上，但 odom0 指向 /odom_noisy（融合价值实验）
+│       │   └── collision_monitor.yaml # 第四层安全：前方障碍降速 / 急停区域
 │       ├── rviz/
 │       │   └── view.rviz             # 预配置的 RViz 布局
 │       ├── CMakeLists.txt
@@ -1254,6 +1416,26 @@ ros2 run robot_localization ekf_node --ros-args \
   --params-file $(ros2 pkg prefix my_robot_description)/share/my_robot_description/config/ekf_noisy.yaml
 ```
 
+### 12. 四层安全链（watchdog + collision_monitor）
+
+`collision_monitor` 已经写进 `gazebo.launch.py`，**启动 Gazebo 就会自动生效**（延迟 10 秒激活）。
+
+```bash
+# ① 启动（含第四层安全）
+ros2 launch my_robot_description gazebo.launch.py
+
+# ② 等 12~15 秒后验证
+ros2 lifecycle get /collision_monitor        # active [3]
+ros2 topic info /cmd_vel_safe                # Publisher 1, Subscription 1
+ros2 topic info /cmd_vel_final               # Publisher 1, Subscription 1
+ros2 topic hz /polygon_stop                  # ~20 Hz
+
+# ③ 直接用 teleop 试：开向墙壁时 /cmd_vel_final 会自动降速再停
+ros2 topic echo /cmd_vel_final --field linear.x
+```
+
+> ⚠️ **`collision_monitor` 不跑，车完全不能动** —— 差速插件只听 `/cmd_vel_final`，这是有意的设计，安全层不可绕过。
+
 ## 环境准备与常用命令
 
 命令速查，避免每次重新翻找。
@@ -1412,6 +1594,14 @@ pgrep -a gzserver                           # 确认服务端还活着
   三条都过才下结论；这套检查直接避免了多次错误结论。
 - 认识到「测不出收益」也是有效结论：仿真中 `/odom` 与 IMU 的角速度完全一致（0.4583 rad/s），
   融合没有可纠正的误差，要验证融合必须人为注入误差源。
+- 掌握 Nav2 **LifecycleNode** 的完整用法：状态机（unconfigured → inactive → active）、
+  手动 `ros2 lifecycle set`、以及用 `lifecycle_manager` + `autostart` 自动纳管。
+- 能用 `nav2_collision_monitor` 搭建独立的物理安全层：多边形区域（stop / slowdown）、
+  与上游 watchdog 的职责分离、以及把它作为最后一道关口插在差速插件之前。
+- 理解 DWB 的**内在代价感知降速**：靠近障碍时高速候选轨迹被 BaseObstacle 否决，
+  只能选低速轨迹 —— 这不是显式限速规则，而是采样评分的副产品。
+- 学会用**安全代价**做量化对比：动态障碍场景下导航时长从 30.1 s 增到 59.6 s（+98%），
+  换来"没有撞上突然出现的障碍"，安全与效率的权衡第一次有了具体数字。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -1432,7 +1622,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] DWB critic 调优：定位到 `RotateToGoal` 是「原地转」的真正来源
 - [x] rclpy 编程（`ament_python` 包 / 订阅发布定时器 / `nav2_simple_commander` 任务脚本）
 - [x] 动态避障实验（地图外障碍，验证三层避障分工）
-- [ ] 代价相关限速（靠近障碍自动降速）+ `nav2_collision_monitor` 独立急停
+- [x] `nav2_collision_monitor` 独立急停与降速（实测：动态障碍下启动降速 35.9%、急停 4.4%，代价为导航时长 +98%）
 - [x] IMU 传感器仿真 + `robot_localization` 扩展卡尔曼融合（结论：仿真中 odom 已足够准，融合收益测不出）
 - [x] 注入 odom 误差源后重做融合实验：偏差 10.0% → 融合后 0.9%（消除 91%，精度提升 11 倍）
 - [ ] 单元测试（gtest / pytest）与组件容器化部署
@@ -1499,7 +1689,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
-| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2° |
+| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
 
 ## 说明
 

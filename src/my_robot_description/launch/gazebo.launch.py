@@ -5,6 +5,7 @@ from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch.actions import IncludeLaunchDescription, TimerAction
 
 
 def generate_launch_description():
@@ -24,6 +25,9 @@ def generate_launch_description():
         ),
         launch_arguments={'world': world_path}.items(),
     )
+
+    # 物理安全层的参数文件
+    collision_params = os.path.join(pkg_share, 'config', 'collision_monitor.yaml')
 
     return LaunchDescription([
         gazebo,
@@ -54,5 +58,37 @@ def generate_launch_description():
             executable='cmd_vel_watchdog',
             parameters=[{'timeout_sec': 0.5}],
             output='screen',
+        ),
+
+                # ============================================================
+        # 物理安全层：前方有障碍时降速 / 急停
+        # 它是 Lifecycle 节点，单独启动会停在 unconfigured，
+        # 必须由 lifecycle_manager 来 configure + activate
+        # ============================================================
+        Node(
+            package='nav2_collision_monitor',
+            executable='collision_monitor',
+            name='collision_monitor',
+            parameters=[collision_params, {'use_sim_time': True}],
+            output='screen',
+        ),
+
+        # 延迟 10 秒再启动生命周期管理器：
+        # 等 Gazebo 把车 spawn 出来、TF 和 /scan 就绪，否则 activate 会失败
+        TimerAction(
+            period=10.0,
+            actions=[
+                Node(
+                    package='nav2_lifecycle_manager',
+                    executable='lifecycle_manager',
+                    name='lifecycle_manager_safety',
+                    parameters=[{
+                        'use_sim_time': True,
+                        'autostart': True,
+                        'node_names': ['collision_monitor'],
+                    }],
+                    output='screen',
+                ),
+            ],
         ),
     ])
