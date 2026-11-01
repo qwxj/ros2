@@ -2,6 +2,18 @@
 <sdf version="1.6">
   <world name="my_world">
 
+    <!-- 物理步长与实时更新率。
+         默认是 0.001 s / 1000 Hz，意味着 /clock 每秒发 1000 条。
+         在 4 核虚拟机上每个节点消化不了这么多，会导致所有
+         use_sim_time 的 ROS 定时器被压到 ~10 Hz（robot_localization
+         的 frequency=30 实际只跑 9.5 Hz 就是这个原因）。
+         差分驱动车不需要 1 ms 精度，改成 250 Hz 后定时器恢复正常。 -->
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_update_factor>1.0</real_time_update_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+
     <!-- 光照：不写的话 Gazebo 里一片漆黑 -->
     <include>
       <uri>model://sun</uri>

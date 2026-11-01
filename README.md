@@ -761,6 +761,12 @@ Gazebo /imu（准）  ───────────────────�
 | **`;` 掩盖前一条命令的失败** | `pkill` 因畸形方括号失败，`echo` 照跑，日志显示"已关闭"但进程还在 | 用 `&&` / `||`；日志语句不能无条件执行 |
 | **launch 是异步的** | `cleanup` 还没 `sleep 2` 完，`gazebo` 已经开始起 | `ExecuteProcess` 不等结束，必须用 `TimerAction` 串行化 |
 | **`ros2 node list` 空但 `topic hz` 正常** | `lifecycle get` 报 `Node not found`，实际节点都在 | 数据面直连、元数据面走 daemon。`ros2 daemon stop && start` 或加 `--no-daemon` |
+| **`/clock` 频率把全系统定时器压制** | EKF 配 30 Hz 只跑 9.5 Hz，改 `frequency` 无效 | `/gazebo` 的 `publish_rate` 默认只有 10 Hz。改 100 Hz 后 EKF 立刻跑到 30.06 Hz |
+| **`/clock` 订阅要 best_effort** | 默认 reliable 订阅报 incompatible QoS，一条收不到，误以为没时钟 | `/clock` 是 BEST_EFFORT + VOLATILE，测量时要显式指定 |
+| **`use_composition: False` 的代价** | 13 个 DDS participant，上下文切换 2 万次/秒，`sy` 45% | 改 `True` 后 participant 13→4，`sy` 45%→15% |
+| **Fast DDS 共享内存抢端口** | `RTPS_TRANSPORT_SHM: fastrtps_port74xx open_and_lock_file failed`，gzserver 的 ROS 插件初始化失败 | `FASTDDS_BUILTIN_TRANSPORTS=UDPv4` 彻底禁用 SHM，报错消失 |
+| **测量脚本自己会丢消息** | 用 `spin_once` 逐条处理高频话题，测出 8.4 Hz 而非真实值 | 用 `threading` + `rclpy.spin` 回调计数；或改用 `ros2 topic hz` |
+| **`pgrep -c` 计数为 0 时 `\|\| echo 0` 会输出两个 0** | shell 判断 `[ "$n" -eq 0 ]` 报 `integer expression expected` | 用 `n=$(pgrep -c x); n=${n:-0}`，不要用 `\|\|` |
 
 > **可信判据 = 数据体检三条**：三个话题 Hz 符合预期（50 / 100 / 10）、
 > `Publisher count` 为 1、自洽性误差在几度以内。三条都满足，结论才可信。
@@ -1398,6 +1404,136 @@ daemon 缓存过期就出现"进程活着但节点找不到"。
 > **涉及文件**：`src/my_robot_description/launch/bringup_all.launch.py`、
 > `src/my_robot_description/launch/gazebo.launch.py`、`src/my_robot_description/launch/gazebo.launch.py`
 
+### 30. 仿真时钟陷阱：`/clock` 的 10 Hz 把全系统定时器压制了
+
+#### 现象
+
+两级 EKF 的第 1 级 `ekf_local` 配置了 `frequency: 30.0`，但实测输出只有 **9.5 Hz**。
+
+```
+$ ros2 topic hz /odometry/local
+average rate: 9.462      # 配置是 30，只跑到 28%
+```
+
+而且这个数字**极其稳定**（8.3 / 8.4 / 9.4 / 9.5 / 9.6），不像 CPU 抖动那样杂乱。
+
+#### 排查：一个个排除
+
+| 假设 | 实验 | 结果 |
+|---|---|---|
+| **CPU 不够** | 只起 Gazebo + EKF，不起 Nav2（load 3.49，空闲 64%） | 还是 9.66 Hz ❌ |
+| **GUI 抢 CPU** | 杀掉 `gzclient`（它占 70% CPU） | 8.33 → 9.44 Hz，只有 +13% ❌ |
+| **相机渲染太贵** | 分辨率 640×480 降到 320×240，数据量 1/4 | 相机 2.84 → 1.82 Hz，EKF 没变 ❌ |
+| **相机关掉** | `always_on=false, visualize=false` | EKF 还是 9.38 Hz ❌ |
+| **`frequency` 没生效** | 分别设 10 / 30 / 60 | **全部 9.5 Hz** ❌ |
+| **`sensor_timeout` 卡住** | 分别设 0.02 / 0.5 | 9.61 / 9.69 Hz ❌ |
+
+`ros2 param get` 确认 `frequency` 是 30.0，参数确实加载了。
+
+#### 根因：`/clock` 只有 10 Hz
+
+关键推理链：
+
+```
+/odom 42 Hz 正常    ← Gazebo 插件按"物理步"驱动，与 ROS 时钟无关
+/odometry/local 9.5 Hz ← ROS 定时器，use_sim_time=true
+```
+
+`use_sim_time:=true` 的节点，其 ROS 定时器**只在仿真时钟更新时才能触发**。
+所以定时器的实际上限 = `/clock` 的发布频率。
+
+实测（用 `best_effort` QoS 才能收到，`/clock` 是 BEST_EFFORT + VOLATILE）：
+
+```
+/clock: 9.5 Hz
+仿真时间 3.80 s / 墙钟 4.00 s  →  RTF 0.949
+```
+
+**每条 `/clock` 覆盖 0.1 s 仿真时间** → 30 Hz 定时器（周期 33 ms）每 0.1 s 最多触发一次
+→ **被压到 10 Hz**。
+
+> **为什么改 `frequency` 到 10/30/60 都没用**：上限是时钟更新率，不是定时器配置。
+
+#### 修复：`/gazebo` 的 `publish_rate` 参数
+
+```bash
+$ ros2 param list /gazebo
+    publish_rate          ← 就是它，默认 10.0
+    use_sim_time
+    ...
+```
+
+`gzserver` 加载的 `libgazebo_ros_init.so` 用这个参数节流 `/clock`。
+
+**新建 `config/gazebo_params.yaml`**：
+
+```yaml
+gazebo:
+  ros__parameters:
+    publish_rate: 100.0
+```
+
+**在 `gazebo.launch.py` 里把它传给 gzserver**：
+
+```python
+IncludeLaunchDescription(
+    PythonLaunchDescriptionSource(...gazebo_ros/launch/gazebo.launch.py),
+    launch_arguments={
+        'world': world_path,
+        'params_file': os.path.join(pkg_share, 'config', 'gazebo_params.yaml'),
+    }.items(),
+)
+```
+
+**结果**：
+
+| 指标 | 改前 | 改后 |
+|---|---|---|
+| `publish_rate` | 10.0 | **100.0** |
+| `/clock` | **9.5 Hz** | **77.6 Hz** |
+| **`/odometry/local`** | **9.5 Hz** | **30.06 Hz** ✅ 正好达标 |
+| `odom→base_footprint` TF | 9.5 Hz | **30.0 Hz** ✅ |
+
+> `publish_rate` 不是越高越好：1000 Hz 会让每个节点把 CPU 全花在消化 `/clock` 上
+> （这台虚拟机就是这样，实测只能处理 ~10 条/秒）。**100 Hz 是够 30 Hz 定时器用、
+> 又不会压垮节点的甜点**。
+
+#### 顺带四组降载措施（都实测有效）
+
+| 措施 | 文件 | 效果 |
+|---|---|---|
+| **Nav2 组件化** `use_composition: True` | `bringup_all.launch.py` | DDS participant 13→4，上下文切换 −47%，`sy` 45%→15% |
+| **禁用 Fast DDS 共享内存** `FASTDDS_BUILTIN_TRANSPORTS=UDPv4` | 同上 | `RTPS_TRANSPORT_SHM Error: fastrtps_port74xx` **彻底消失**（这个报错会让 gzserver 的 ROS 插件初始化失败，`/odom` `/scan` 全没有） |
+| **相机 640×480@15 → 320×240@5** + `visualize=false` | `robot.urdf` | 相机从跑不动变成 4.57 Hz |
+| **物理 1000 Hz → 250 Hz**（步长 1 ms → 4 ms） | `worlds/my_world.world` | RTF 0.949 → 0.999，Gazebo CPU 大降 |
+
+> 最后那项：`my_world.world` 原本**没有 `<physics>` 段**，用的是 Gazebo 默认
+> `max_step_size=0.001 / real_time_update_rate=1000`。差分驱动车不需要 1 ms 精度。
+
+#### 方法论：怎么判断"定时器被时钟压制"
+
+遇到「ROS 定时器配置的频率达不到」，按这个顺序排除：
+
+```
+① 换 frequency 值，输出跟不跟？
+   不跟 → 不是定时器配置问题
+② 关掉一切负载再测，还不变？
+   不变 → 不是算力问题
+③ 量 /clock 的实际频率（注意 QoS 要用 best_effort）
+   和定时器频率对比 —— 若 /clock 频率 ≤ 目标频率，就是它
+④ 检查 clk 每条消息覆盖的仿真时间：仿真时间增量 / 消息数 > 1/frequency 即坐实
+```
+
+> **排查里最费时间的不是修，是排除。** 这一轮排掉了 CPU、GUI、相机、`frequency`、
+> `sensor_timeout` 五个假设，每个都要一次完整重启验证。**所以先做"改参数就能验证"的实验
+> （`frequency` 10/30/60），再做"要重启才能验证"的实验。**
+
+> **涉及文件**：`src/my_robot_description/config/gazebo_params.yaml`、
+> `src/my_robot_description/launch/gazebo.launch.py`、
+> `src/my_robot_description/launch/bringup_all.launch.py`、
+> `src/my_robot_description/worlds/my_world.world`、
+> `src/my_robot_description/urdf/robot.urdf`
+
 ## 项目结构
 
 ```text
@@ -1493,7 +1629,9 @@ ros2/
 │       │   ├── nav2_params.baseline.yaml  # 调参实验的基线备份
 │       │   ├── ekf.yaml              # robot_localization EKF 融合配置
 │       │   ├── ekf_noisy.yaml        # 同上，但 odom0 指向 /odom_noisy（融合价值实验）
-│       │   └── collision_monitor.yaml # 第四层安全：前方障碍降速 / 急停区域
+│       │   ├── collision_monitor.yaml # 第四层安全：前方障碍降速 / 急停区域
+│       │   ├── ekf_local.yaml        # 第 1 级 EKF：odom 系内融合轮式+IMU，发 odom→base_footprint
+│       │   └── gazebo_params.yaml    # gzserver 参数（publish_rate=100 控制 /clock 频率）
 │       ├── rviz/
 │       │   └── view.rviz             # 预配置的 RViz 布局
 │       ├── launch/
@@ -2199,6 +2337,14 @@ pgrep -a gzserver                           # 确认服务端还活着
   `PathJoinSubstitution` + `FindPackageShare` 彻底消灭写死的绝对路径（换机器不用改）。
 - 把"7 个终端 / 12 条命令 / 3 次凭感觉等待"压缩成**一条命令 + 18 秒**，
   而且每次行为一致 —— 这是"能跑"到"可复现"的分界线。
+- 理解 **`use_sim_time` 的隐藏成本**：仿真时间不是免费的，ROS 定时器的实际上限就是
+  `/clock` 的发布频率。`/gazebo` 的 `publish_rate` 默认 10 Hz，会把全系统定时器压到 10 Hz 以内
+  （实测 `ekf_local` 配 30 Hz 只跑到 9.5 Hz，改 100 Hz 后立刻恢复 30.06 Hz）。
+- 学会**分层排除故障**：先用「改参数就能验证」的实验（`frequency` 10/30/60）快速否掉配置问题，
+  再做「要完整重启」的实验（关负载、关相机）。**排掉五个假设比修一个 bug 更耗时，顺序很重要。**
+- 认清**虚拟机跑仿真的真实瓶颈**：4 核 / 软件渲染 / GUI 常开的条件下，Gazebo + 完整 Nav2
+  已接近上限。组件化、禁用 SHM、降相机、降物理步长四项措施把 `sy` 从 45% 压到 14%、
+  RTF 从 0.949 提到 0.999。
 - 熟悉 ROS 2 功能包的 CMake 构建、colcon 编译和 launch 启动流程。
 
 ## 后续计划
@@ -2289,7 +2435,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 | **2026-10-29** | 初始化工作区（`my_first_pkg` + `my_robot_interfaces`）；完成 Topic / Service / Action、自定义 msg/srv、生命周期节点、组件、执行器、参数、QoS、TF2、launch 等基础示例；建立 `.gitignore` 与初版 README |
 | **2026-10-30** | 并发与性能专题：Callback Group（`MutuallyExclusive` / `Reentrant`）、任务隔离、独立工作线程；进程内通信与 loaned message 零拷贝（含 Fast DDS `data_sharing` profile）；大消息基准测试、内存池复用与丢弃策略；端到端延迟测量与 `callback_mode` 对比 |
 | **2026-10-31** | ① 重写 README（项目简介 / 技术栈 / 已实现功能 / 项目结构 / 编译运行 / 技术收获 / 后续计划）；新增「全部 Demo 一览」表，并为各功能标注涉及文件<br>② 进入 Gazebo 仿真：URDF 补 `<inertial>` / `<collision>` 与万向轮；差速驱动 + 里程计；自写速度指令看门狗；激光雷达 `/scan` + 带障碍物的 world；相机 + `cv_bridge` + OpenCV 边缘检测；参数持久化（YAML + launch 加载）<br>③ rosbag2：录制 `drive_01`（4 话题 / 37 s / 3.7 MiB）与 `with_cam`（相机 / 19 s / 234 MiB）；用 `play --clock` 实现无 Gazebo 回放，验证算法与数据源解耦；`.gitignore` 排除 `bags/`<br>④ SLAM 建图：`slam_toolbox` 在线建图跑通，产出 `maps/my_map.pgm`（110×81 @ 0.05 m/px = 5.5×4.05 m）；新增「调试经验」章节，记录 TF / 日志 / 命令行三类坑<br>⑤ README 新增「环境准备与常用命令」章节：apt 依赖清单（版本已验证）、查询速查表、仿真环境 TF 查询规范、性能降载方法<br>⑥ Nav2 导航：`bringup_launch.py` 跑通完整栈，按小车尺寸调整 6 处参数，产出 `config/nav2_params.yaml`；修复 `/cmd_vel` 多发布者冲突，把看门狗改为**串联安全层**（`/cmd_vel → /cmd_vel_safe → 差速插件`）；README 补 §19 / §9 与「调试经验」Nav2 小节<br>⑦ 参数调优：建立「静态 bag + `/plan` 指标」的离线实验方法，`tools/bag_metrics.py` 支持多 bag 并排对比；实测 `inflation_radius` 0.55 → 0.35 使绕障路径 3.77 m → 3.44 m（−8.8%），并发现目标点须选在障碍附近才能测出差异<br>⑧ 在线调参与任务编排：发现 controller 与 velocity_smoother 的两级限幅（0.30 被削到 0.26），两处同时放开后导航时长 20.6 s → 15.4 s（−25%）；`FollowWaypoints` 5 航点巡航实测轨迹 11.07 m（追踪误差 2.7%），识别出瓶颈是转向对准（33.7%）；`bag_metrics.py` 增加时长 / 真停 / 原地转 / 归一化抖动 |
-| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑭ 视觉目标导航：`red_target_detector`（红块→像素反投影→map 坐标，投影误差 2~3 cm）+ `go_to_target`（多帧收敛 + 自适应 standoff + BasicNavigator）；实测车 (0,0)→(0.31,-0.04)、距目标 0.209 m < 容差 0.25、`status=4 SUCCEEDED`；修掉 `isTaskComplete()` 在回调里二次 spin、`use_sim_time` 未开、目标落入膨胀区三个问题<br>⑮ 单元测试：把纯几何计算从 ROS 节点抽成 `geometry.py`，写 13 个 pytest 用例（光学系→车体旋转、四元数、像素反投影、地面求交、双向往返），0.14 秒全部通过；建立「期望值必须来自被测代码之外」的 5 类来源与变异测试验证法<br>⑯ launch 参数化：`maps/` 用 `git mv` 搬进 `my_robot_description` 包（CMakeLists 加 `maps`）并同步更新 README 全部路径；新增 `bringup_all.launch.py`（`ExecuteProcess` 清理 / `TimerAction` 分阶段 / `IncludeLaunchDescription` 接 Nav2 / `PathJoinSubstitution` 免绝对路径 / `headless` 参数），把「7 终端 12 命令 3 次凭感觉等待」压成一条命令、18 秒全栈就绪；排查 `pkill -f` 两次自匹配（含 echo 文本里出现进程名）、`;` 掩盖失败、launch 异步执行、`ros2 daemon` 缓存陈旧四个坑 |<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
+| **2026-11-01** | DWB critic 调优：用 0.5 s 粒度指令时间线（`tools/cmd_timeline.py`）定位出「原地转 100% 发生在到点后的朝向对准」，两轮改 `PathAlign`/`GoalAlign` 权重均无效；最终关掉 `RotateToGoal` 并放宽 `yaw_goal_tolerance` 到 3.15，原地转 21% → **0%**、运动时长 15.4 s → **10.8 s（−30%）**<br>⑨ rclpy：新建 `ament_python` 包 `my_robot_tasks`（`pose_monitor` / `cmd_vel_repeater` / `patrol`），打通 Python 侧订阅发布与 `nav2_simple_commander` 任务编排；实测确认 teleop 为「锁存」语义，repeater 在链路上多余<br>⑩ 动态避障：spawn 0.4 m 方块到 (1.0,0)，全局路径第一条即绕开（`obstacle_layer` 实时标记），绕行峰值 y=0.87、路径 3.97 m（直线 2.80 m，+42%）；发现避障时不减速（`\|v\|` 平均 0.263 m/s）<br>⑪ IMU + EKF：URDF 接入 `imu_link`（100 Hz、重力 z=9.83 验证通过），`robot_localization` 配置 `two_d_mode` + `publish_tf: false` + 只用 `vyaw`；原地转 13 秒实测 IMU 310.3°、`/odom` 307.6°（−0.9%）、`/odometry/filtered` 306.9°（−1.1%）→ **仿真中 odom 已足够准，融合收益测不出**；排查中定位到「两个 ekf_node 实例并存导致数据混合」「src≠install」「丢帧使积分虚高」等问题<br>⑫ 融合价值实验：新增 rclpy 节点 `odom_noise`（角速度 ×1.10 并用污染值重积分 yaw）+ `ekf_noisy.yaml`；注入 10.0% 偏差后融合输出误差仅 0.9%（**消除 91%，精度提升 11 倍**），误差不随时间累积；同时定位到「时间轴运算必须用 `header.stamp` 而非 bag 记录时间」，修正后自洽性从 ±12° 恢复到 ±0.2°<br>⑭ 视觉目标导航：`red_target_detector`（红块→像素反投影→map 坐标，投影误差 2~3 cm）+ `go_to_target`（多帧收敛 + 自适应 standoff + BasicNavigator）；实测车 (0,0)→(0.31,-0.04)、距目标 0.209 m < 容差 0.25、`status=4 SUCCEEDED`；修掉 `isTaskComplete()` 在回调里二次 spin、`use_sim_time` 未开、目标落入膨胀区三个问题<br>⑮ 单元测试：把纯几何计算从 ROS 节点抽成 `geometry.py`，写 13 个 pytest 用例（光学系→车体旋转、四元数、像素反投影、地面求交、双向往返），0.14 秒全部通过；建立「期望值必须来自被测代码之外」的 5 类来源与变异测试验证法<br>⑯ launch 参数化：`maps/` 用 `git mv` 搬进 `my_robot_description` 包（CMakeLists 加 `maps`）并同步更新 README 全部路径；新增 `bringup_all.launch.py`（`ExecuteProcess` 清理 / `TimerAction` 分阶段 / `IncludeLaunchDescription` 接 Nav2 / `PathJoinSubstitution` 免绝对路径 / `headless` 参数），把「7 终端 12 命令 3 次凭感觉等待」压成一条命令、18 秒全栈就绪；排查 `pkill -f` 两次自匹配（含 echo 文本里出现进程名）、`;` 掩盖失败、launch 异步执行、`ros2 daemon` 缓存陈旧四个坑<br>⑰ 两级 EKF 第 1 级落地 + 仿真时钟陷阱：`ekf_local` 接管 `odom→base_footprint`（`diff_drive` 关 `publish_odom_tf`、EKF `publish_tf: true`），实测 `odom→base_footprint` **30.0 Hz**、轮子 TF 99.9 Hz、运动链 `/cmd_vel 0.2 → /cmd_vel_final 0.2 → /odom vx 0.1995` 全通；排查出 EKF 配置 30 Hz 只跑 9.5 Hz 的根因是 **`/gazebo` 的 `publish_rate` 默认 10 Hz 节流 `/clock`，把全系统 `use_sim_time` 定时器压到 10 Hz 以内**，改 100 Hz 后 `/clock` 77.6 Hz、EKF 30.06 Hz；顺带四组降载（Nav2 组件化 13→4 participant、`FASTDDS_BUILTIN_TRANSPORTS=UDPv4` 消除 SHM 抢端口、相机 320×240@5、物理 250 Hz 步长 4 ms）使 `sy` 45%→14%、RTF 0.949→0.999 |<br>⑬ 第四层安全 `nav2_collision_monitor`：接入 `gazebo.launch.py` 并用 `lifecycle_manager` 延迟 10 秒自动激活；直线撞击实测触发距离 0.698/0.293 m（设计 0.70/0.28）、`slowdown_ratio` 精确 0.40、无边界抖动；动态障碍实验箱子出现后同一采样点内 0.300→0.120（<50 ms），全程降速 35.9% / 急停 4.4%，导航时长 30.1 s → 59.6 s（+98%）；同时修正了「DWB 不减速」的错误判断 |
 
 ## 说明
 

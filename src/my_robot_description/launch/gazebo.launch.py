@@ -6,6 +6,7 @@ from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch.actions import IncludeLaunchDescription, TimerAction
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -23,7 +24,9 @@ def generate_launch_description():
             os.path.join(get_package_share_directory('gazebo_ros'),
                          'launch', 'gazebo.launch.py')
         ),
-        launch_arguments={'world': world_path}.items(),
+        launch_arguments={'world': world_path,
+            'params_file': os.path.join(pkg_share, 'config', 'gazebo_params.yaml'),
+        }.items(),
     )
 
     # 物理安全层的参数文件
@@ -70,6 +73,15 @@ def generate_launch_description():
             executable='collision_monitor',
             name='collision_monitor',
             parameters=[collision_params, {'use_sim_time': True}],
+            output='screen',
+        ),
+
+        Node(
+            package='robot_localization',
+            executable='ekf_node',
+            name='ekf_local',
+            parameters=[os.path.join(pkg_share, 'config', 'ekf_local.yaml')],
+            remappings=[('odometry/filtered', '/odometry/local')],   # ★ 避免和 ekf_global 抢话题
             output='screen',
         ),
 

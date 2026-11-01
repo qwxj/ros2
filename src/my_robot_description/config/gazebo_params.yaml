@@ -1,0 +1,12 @@
+# gzserver（libgazebo_ros_init.so）的参数。
+#
+# publish_rate 控制 /clock 的发布频率，默认 10.0 Hz。
+# 这非常关键：所有 use_sim_time:=true 的 ROS 定时器只在仿真时钟更新时
+# 才能触发，所以 /clock 只有 10 Hz 时，30 Hz 的定时器实际只能跑到 10 Hz
+# （robot_localization 的 frequency=30 实测只有 9.5 Hz 就是这个原因）。
+#
+# 提到 100 Hz：足够让 30 Hz 的定时器正常触发，又不至于像 1000 Hz 那样
+# 把所有节点压垮（节点处理 /clock 本身也要花 CPU）。
+gazebo:
+  ros__parameters:
+    publish_rate: 100.0

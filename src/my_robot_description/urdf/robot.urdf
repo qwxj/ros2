@@ -331,15 +331,15 @@
 
     <sensor type="camera" name="camera">
       <always_on>true</always_on>
-      <visualize>true</visualize>
-      <update_rate>15</update_rate>
+      <visualize>false</visualize>
+      <update_rate>5</update_rate>
 
       <camera name="front">
         <!-- 1.047 rad = 60° 水平视角 -->
         <horizontal_fov>1.047</horizontal_fov>
         <image>
-          <width>640</width>
-          <height>480</height>
+          <width>320</width>
+          <height>240</height>
           <format>R8G8B8</format>
         </image>
         <clip>
@@ -438,7 +438,7 @@
       <robot_base_frame>base_footprint</robot_base_frame>
 
       <publish_odom>true</publish_odom>
-      <publish_odom_tf>true</publish_odom_tf>
+      <publish_odom_tf>false</publish_odom_tf>
       <publish_wheel_tf>true</publish_wheel_tf>
     </plugin>
   </gazebo>
