@@ -238,3 +238,247 @@ inflation_radius: 0.30
 
 > **涉及文件**：`src/my_robot_control/`（15 个文件）、
 > `src/my_robot_tasks/my_robot_tasks/cmd_vel_adapter.py`
+
+---
+
+### 34. ros2_control 进阶：八项能力逐个落地
+
+§33 把 ros2_control 的骨架跑通了，这一节在里面填了八件「真东西」。
+每一项都附实测数据，不是「应该能行」。
+
+#### ① 电机惯性：从「瞬时响应」到 `dω/dt = (τ − b·ω) / J`
+
+原来的 `write()` 是 `velocity = clamp(cmd)` —— 指令一变速度立刻到位，没有任何动态过程。
+现在改成力矩驱动的物理模型：
+
+```cpp
+// velocity 模式：速度环 P 控制 + 前馈，稳态无差但有动态滞后
+torque = b * target + Kp * (target - velocity);
+// effort 模式：力矩直接驱动
+torque = clamp(effort_command, ±max_effort);
+
+const double accel = (torque - b * velocity) / J;
+velocity += accel * dt;
+```
+
+参数：`J = 0.5 kg·m²`、`b = 0.05`、`Kp = 2.0`、`max_effort = 5 N·m`
+→ 理论时间常数 `τ = J/(b+Kp) = 244 ms`。
+
+**实测阶跃响应**（目标 3.0 rad/s）：
+
+| 指标 | 实测 | 理论 |
+|---|---|---|
+| 达到 63% 用时 | **300 ms** | 244 ms |
+| 峰值 | 2.98 rad/s（无超调）| 3.0 |
+| 前 200 ms 序列 | 0 → 0.1 → 0.2 → 0.3 → 0.4 | 一阶上升 |
+
+**为什么这个改动重要**：没有它，`/odom` 是完美无噪声的，EKF 融合实验看起来「融合反而更差」
+（见 §31）；有了动态滞后，融合才有真实的东西可滤。
+
+#### ② 编码器量化：4096 线
+
+```cpp
+const double res = 2.0 * M_PI / encoder_cpr_;      // 0.001534 rad / 刻度
+position_raw_ += velocity * dt;                    // 内部保持连续
+position_ = std::round(position_raw_ / res) * res; // 对外只给离散刻度
+```
+
+**实测**：`position / res` 到最近整数的最大偏差 **4.55e-13** —— 说明对外暴露的确实是刻度整数倍。
+（内部保留连续量，否则每步先量化再积分会系统性丢量。）
+
+#### ③ IMU：`hardware_interface::SensorInterface`（第三种硬件类型）
+
+ros2_control 有三种硬件类型：`SystemInterface`（读写）、`ActuatorInterface`（单执行器）、
+**`SensorInterface`（只读，没有 command interface）**。
+
+```xml
+<ros2_control name="ImuSensor" type="sensor">
+  <hardware><plugin>my_robot_control/ImuSensor</plugin></hardware>
+  <sensor name="imu_sensor">
+    <state_interface name="orientation.x"/>   <!-- 共 10 个 -->
+    ...
+  </sensor>
+</ros2_control>
+```
+
+**它怎么知道机器人真的在转**：`DiffDriveHardware` 和 `ImuSensor` 在**同一进程的同一个 `.so`** 里，
+用一个进程内单例 `ground_truth()` 传递「真实运动」：
+
+```cpp
+// DiffDriveHardware::read()  写入
+gt.yaw_rate = (velocity_[1] - velocity_[0]) * wheel_radius / wheel_separation;
+gt.yaw += gt.yaw_rate * dt;
+
+// ImuSensor::read()  采样并加噪声
+angular_velocity_[2] = gt.yaw_rate + bias_ + noise(rng_);
+```
+
+真实硬件里这个角色由物理世界承担，这里是「用一个进程内单例代替物理世界」。
+
+**实测**：`/imu_sensor_broadcaster/imu` **99.99 Hz**；
+静止时 vyaw 均值 **0.00492**（≈ 设定的 bias）、标准差 **0.01854**（≈ 设定的 σ=0.02）。
+
+#### ④ 完整生命周期
+
+| 回调 | 何时调 | 本实现 |
+|---|---|---|
+| `on_init` | 只调一次 | 读 `<param>`、**分配缓冲** |
+| `on_configure` | 可反复 | 只 `fill(0)`，**不重新分配** |
+| `on_activate` | 上电 | 清零 + 重置 ground_truth |
+| `on_deactivate` | 下电 | 清速度/指令，保留位置 |
+| `on_cleanup` | 关设备 | 只 `fill(0)`，**不 `clear()`** |
+| `on_error` | 出错 | 强制停车 |
+
+> ⚠️ **`on_init` 和 `on_configure` 的分工是有硬约束的**，见下面「坑 A」。
+
+#### ⑤ `HW_IF_EFFORT`：状态 + 指令双向
+
+```cpp
+// 状态：力矩反馈（真实硬件是电流采样）——joint_states 里的 effort 不再是 NaN
+out.emplace_back(name, HW_IF_EFFORT, &effort_[i]);
+// 指令：motor_mode:=effort 时 write() 用它
+out.emplace_back(name, HW_IF_EFFORT, &effort_command_[i]);
+```
+
+`ros2 control list_hardware_interfaces` 可以看到：
+
+```
+command interfaces
+    left_wheel_joint/effort     [available] [unclaimed]   ← 暴露了，没被认领
+    left_wheel_joint/velocity   [available] [claimed]     ← diff_drive_controller 认领了
+```
+
+**实测 effort 通路**（`motor_mode:=effort` + 切到 `manual_effort_controller`，发 0.30 N·m）：
+
+| 指标 | 实测 | 理论 |
+|---|---|---|
+| 力矩反馈峰值 | **0.300 N·m** | 0.30 |
+| 轮速峰值（2 S 后） | **1.098 rad/s** | `6·(1−e^(−2/10)) = 1.09` |
+| 前 8 帧速度 | 0 → 0.01 → 0.02 → 0.03 → 0.04 | 一阶爬升 |
+
+稳态 `τ/b = 0.30/0.05 = 6.0 rad/s`，时间常数 `J/b = 10 s` —— 完全吻合。
+
+#### ⑥⑦ 安全链 + 两级 EKF
+
+```
+/cmd_vel ──watchdog──▶ /cmd_vel_safe ──collision_monitor──▶ /cmd_vel_final ──▶ 适配器
+```
+
+```
+map ──[ekf_global 22 Hz，融合 /amcl_pose + /odometry/local]──▶ odom
+odom ──[ekf_local 24 Hz，融合 /odom + IMU vyaw]──────────────▶ base_link
+```
+
+**关键的两行「让权」**：
+
+```yaml
+# controllers.yaml —— diff_drive_controller 不再发 TF
+enable_odom_tf: false
+```
+```yaml
+# nav2_params_standalone.yaml —— AMCL 不再发 TF
+tf_broadcast: false
+```
+
+**实测**：`map→odom` 22.4 Hz、`odom→base_link` 23.6 Hz；
+自主导航 (0,0)→(2.5,−1.5) `status=4 SUCCEEDED`，17.1 s，**距目标 0.100 m**
+（比 §33 单级 EKF 的 0.244 m 更准 —— 因为 yaw 由 IMU 保住了）。
+
+#### ⑧ `ros2 control switch_controllers` 运行时热切换
+
+`diff_drive_controller` 和 `manual_velocity_controller` 争抢同一个 `velocity` 指令接口，
+所以**只能有一个 active** —— 正好用来演示热切换。
+
+```
+$ ros2 control list_controllers
+diff_drive_controller      active
+manual_velocity_controller inactive
+manual_effort_controller   inactive
+
+$ ros2 control switch_controllers --strict \
+    --deactivate diff_drive_controller --activate manual_velocity_controller
+Successfully switched controllers
+```
+
+---
+
+#### 坑 A：缓冲分配必须在 `on_init`，否则进程 SIGABRT
+
+**现象**：硬件加载、configure、activate 全部成功，然后 `ros2_control_node` 直接崩：
+
+```
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  double hardware_interface::ReadOnlyHandle::get_value() const failed. value_ptr_ is null.
+  #7 libdiff_drive_controller.so
+  #8 controller_manager::ControllerManager::update(...)
+exit code -6 (SIGABRT)
+```
+
+**根因**：`export_state_interfaces()` 是在 **`on_init` 阶段**被 `resource_manager` 调用的，
+框架会**永久记住这些成员的地址**。而我把缓冲分配写在了 `on_configure`：
+
+```cpp
+// ❌ 错
+on_init:      /* 什么都没分配 */
+export_state_interfaces(): &position_[i]   // position_ 还是空 vector -> 越界/空指针
+on_configure: position_.assign(n, 0.0);    // 重新分配 -> 之前给的地址全悬空
+```
+
+**正确做法**：
+
+```cpp
+// ✅ 对
+on_init:                 position_.assign(n, 0.0);   // 只在这里分配
+on_configure/on_cleanup: std::fill(...);             // 只 fill，绝不 assign/clear
+```
+
+> **一句话记住**：`export_*_interfaces` 给出去的是指针，
+> 所以这些成员从 `on_init` 起就必须存在，且**直到进程结束都不能重新分配或释放**。
+
+#### 坑 B：`switch_controllers` 的「假成功」
+
+```
+$ ros2 control switch_controllers --deactivate diff_drive_controller --activate manual_velocity_controller
+Successfully switched controllers            ← 看着成功
+$ ros2 control list_controllers
+diff_drive_controller      inactive
+(manual_velocity_controller 根本不在列表里)   ← 其实什么都没做
+```
+
+**根因**：`switch_controllers` 默认 `BEST_EFFORT` 严格度，**静默跳过未加载的控制器**。
+没加载就跳过，然后照样打印成功。
+
+**修法**：
+1. launch 里用 `spawner <name> --inactive` **预加载**；
+2. 调用时加 `--strict`，让它失败就报错。
+
+#### 坑 C：`nohup setsid` 起的 launch，`pkill -INT` 杀不干净
+
+残留第二个实例 → **所有话题频率翻倍**（`/scan` 20 Hz、`/odom` 98 Hz、`/odometry/local` 59 Hz）。
+最坑的是：每一级单独看都「有数据」，看不出异常；**只有算一下「应该是多少」才会发现**。
+
+**修法**：循环 `pkill` 直到 `pgrep` 计数为 0，再逐个按进程名兜底。
+
+#### 坑 D：`imu_sensor_broadcaster` 的协方差默认是 0
+
+`robot_localization` 看到 0 协方差会理解成「这个测量完美无缺」，
+于是**无条件信任 IMU**，把陀螺偏置和噪声全部积分成 yaw 漂移。
+必须显式给：
+
+```yaml
+static_covariance_angular_velocity: [1e-4, 0.0, 0.0, 0.0, 1e-4, 0.0, 0.0, 0.0, 1e-4]
+```
+
+而且这个值和 `ImuSensor` 实际注入的噪声 σ **必须匹配**（σ=0.01 → 方差 1e-4）。
+
+#### 实测汇总（单实例，ERROR 0 条）
+
+| 话题 | 频率 | 配置 |
+|---|---|---|
+| `/scan` | 10.000 Hz | 10 |
+| `/joint_states` | 99.99 Hz | update_rate 100 |
+| `/imu_sensor_broadcaster/imu` | 99.99 Hz | 100 |
+| `/odom` | 50.01 Hz | publish_rate 50 |
+| `/odometry/local` | 29.35 Hz | ekf_local 30 |
+| `map→odom` | 22.4 Hz | ekf_global 30（CPU 受限）|
+| `odom→base_link` | 23.6 Hz | ekf_local 30（CPU 受限）|
