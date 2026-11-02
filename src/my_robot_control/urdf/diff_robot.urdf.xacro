@@ -1,171 +1,219 @@
 <?xml version="1.0"?>
 <robot name="diff_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-    <!-- 机器人底盘 -->
-    <!-- 机器人底盘 -->
-    <link name="base_link">
+    <!-- ══════════════════════════════════════════════════════
+         xacro 参数（launch 里可覆盖）
+         ══════════════════════════════════════════════════════ -->
+    <xacro:arg name="motor_mode"      default="velocity"/>
+    <xacro:arg name="motor_inertia"   default="0.5"/>
+    <xacro:arg name="viscous_friction" default="0.05"/>
+    <xacro:arg name="vel_gain"        default="2.0"/>
+    <xacro:arg name="max_effort"      default="5.0"/>
+    <xacro:arg name="encoder_cpr"     default="4096"/>
 
-        <!-- 外观 -->
+    <!-- ══════════════════════════════════════════════════════
+         几何参数（xacro:property —— 改一处全车生效）
+         ══════════════════════════════════════════════════════ -->
+    <xacro:property name="base_length"      value="0.30"/>
+    <xacro:property name="base_width"       value="0.25"/>
+    <xacro:property name="base_height"      value="0.10"/>
+    <xacro:property name="base_mass"        value="5.0"/>
+
+    <xacro:property name="wheel_radius"     value="0.05"/>
+    <xacro:property name="wheel_width"      value="0.025"/>
+    <xacro:property name="wheel_mass"       value="0.5"/>
+    <xacro:property name="wheel_separation" value="0.30"/>
+    <xacro:property name="wheel_y"          value="${wheel_separation/2}"/>
+
+    <xacro:property name="laser_radius"     value="0.04"/>
+    <xacro:property name="laser_height"     value="0.04"/>
+
+    <!-- 实心圆柱绕轴的转动惯量：m·r²/2（径向）；绕轴向：m·r² -->
+    <xacro:macro name="cylinder_inertia" params="m r h">
+        <inertia
+            ixx="${m*(3*r*r+h*h)/12}" ixy="0.0" ixz="0.0"
+            iyy="${m*(3*r*r+h*h)/12}" iyz="0.0"
+            izz="${m*r*r/2}"/>
+    </xacro:macro>
+
+    <!-- ══════════════════════════════════════════════════════
+         底盘
+         ══════════════════════════════════════════════════════ -->
+    <link name="base_link">
         <visual>
             <geometry>
-                <box size="0.30 0.25 0.10"/>
+                <box size="${base_length} ${base_width} ${base_height}"/>
             </geometry>
-
             <material name="blue">
                 <color rgba="0.1 0.3 0.8 1.0"/>
             </material>
         </visual>
-
-        <!-- 碰撞模型 -->
         <collision>
             <geometry>
-                <box size="0.30 0.25 0.10"/>
+                <box size="${base_length} ${base_width} ${base_height}"/>
             </geometry>
         </collision>
-
-        <!-- 惯性参数 -->
         <inertial>
-            <mass value="5.0"/>
+            <mass value="${base_mass}"/>
             <origin xyz="0 0 0" rpy="0 0 0"/>
             <inertia
-                ixx="0.0354"
-                ixy="0.0"
-                ixz="0.0"
-                iyy="0.0500"
-                iyz="0.0"
+                ixx="0.0354" ixy="0.0" ixz="0.0"
+                iyy="0.0500" iyz="0.0"
                 izz="0.0563"/>
         </inertial>
-
     </link>
 
-    <!-- 左轮 -->
-    <link name="left_wheel_link">
-        <!-- 外观 -->
-        <visual>
-            <origin rpy="1.5708 0 0"/>
-            <geometry>
-                <cylinder radius="0.05" length="0.025"/>
-            </geometry>
-            <material name="black">
-                <color rgba="0.1 0.1 0.1 1.0"/>
-            </material>
-        </visual>
+    <!-- ══════════════════════════════════════════════════════
+         轮子（用宏，左右只差一个符号）
+         ══════════════════════════════════════════════════════ -->
+    <xacro:macro name="wheel" params="side y">
+        <link name="${side}_wheel_link">
+            <visual>
+                <origin rpy="1.5708 0 0"/>
+                <geometry>
+                    <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+                </geometry>
+                <material name="black">
+                    <color rgba="0.1 0.1 0.1 1.0"/>
+                </material>
+            </visual>
+            <collision>
+                <origin rpy="1.5708 0 0"/>
+                <geometry>
+                    <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+                </geometry>
+            </collision>
+            <inertial>
+                <mass value="${wheel_mass}"/>
+                <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+                <xacro:cylinder_inertia m="${wheel_mass}" r="${wheel_radius}" h="${wheel_width}"/>
+            </inertial>
+        </link>
 
-        <!-- 碰撞模型 -->
-        <collision>
-            <origin rpy="1.5708 0 0"/>
-            <geometry>
-                <cylinder radius="0.05" length="0.025"/>
-            </geometry>
-        </collision>
-
-        <!-- 惯性参数 -->
-        <inertial>
-            <mass value="0.5"/>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <inertia
-                ixx="0.000323"
-                ixy="0.0"
-                ixz="0.0"
-                iyy="0.000625"
-                iyz="0.0"
-                izz="0.000323"/>
-        </inertial>
-
-    </link>
-
-    <!-- 右轮 -->
-    <link name="right_wheel_link">
-        <visual>
-            <origin rpy="1.5708 0 0"/>
-            <geometry>
-                <cylinder radius="0.05" length="0.025"/>
-            </geometry>
-            <material name="black">
-                <color rgba="0.1 0.1 0.1 1.0"/>
-            </material>
-        </visual>
-    </link>
-
-    <!-- 左轮关节 -->
-    <joint name="left_wheel_joint" type="continuous">
-        <parent link="base_link"/>
-        <child link="left_wheel_link"/>
-        <origin xyz="0 0.15 -0.05" rpy="0 0 0"/>
-        <axis xyz="0 1 0"/>
-    </joint>
-
-    <!-- 右轮关节 -->
-    <joint name="right_wheel_joint" type="continuous">
-        <parent link="base_link"/>
-        <child link="right_wheel_link"/>
-        <origin xyz="0 -0.15 -0.05" rpy="0 0 0"/>
-        <axis xyz="0 1 0"/>
-    </joint>
-
-    <!-- ros2_control 硬件接口 -->
-    <ros2_control name="DiffDriveSystem" type="system">
-
-        <hardware>
-            <plugin>my_robot_control/DiffDriveHardware</plugin>
-        </hardware>
-
-        <joint name="left_wheel_joint">
-            <command_interface name="velocity"/>
-            <state_interface name="position"/>
-            <state_interface name="velocity"/>
+        <joint name="${side}_wheel_joint" type="continuous">
+            <parent link="base_link"/>
+            <child link="${side}_wheel_link"/>
+            <origin xyz="0 ${y} -${wheel_radius}" rpy="0 0 0"/>
+            <axis xyz="0 1 0"/>
         </joint>
+    </xacro:macro>
 
-        <joint name="right_wheel_joint">
-            <command_interface name="velocity"/>
-            <state_interface name="position"/>
-            <state_interface name="velocity"/>
-        </joint>
+    <xacro:wheel side="left"  y="${wheel_y}"/>
+    <xacro:wheel side="right" y="${-wheel_y}"/>
 
-    </ros2_control>
-
-
-    <!-- 激光雷达 -->
+    <!-- ══════════════════════════════════════════════════════
+         激光雷达
+         ══════════════════════════════════════════════════════ -->
     <link name="laser_link">
-
         <visual>
-            <!-- 雷达外壳 -->
             <geometry>
-                <cylinder radius="0.04" length="0.04"/>
+                <cylinder radius="${laser_radius}" length="${laser_height}"/>
             </geometry>
-
             <material name="orange">
                 <color rgba="1.0 0.4 0.0 1.0"/>
             </material>
         </visual>
-
         <collision>
             <geometry>
-                <cylinder radius="0.04" length="0.04"/>
+                <cylinder radius="${laser_radius}" length="${laser_height}"/>
             </geometry>
         </collision>
-
         <inertial>
             <mass value="0.2"/>
             <origin xyz="0 0 0" rpy="0 0 0"/>
-            <inertia
-                ixx="0.000137"
-                ixy="0.0"
-                ixz="0.0"
-                iyy="0.000137"
-                iyz="0.0"
-                izz="0.000160"/>
+            <xacro:cylinder_inertia m="0.2" r="${laser_radius}" h="${laser_height}"/>
         </inertial>
-
     </link>
 
-    <!-- 雷达固定关节 -->
     <joint name="base_to_laser_joint" type="fixed">
         <parent link="base_link"/>
         <child link="laser_link"/>
-
-        <!-- 雷达安装在底盘中心上方 -->
         <origin xyz="0.10 0 0.08" rpy="0 0 0"/>
     </joint>
+
+    <!-- ══════════════════════════════════════════════════════
+         IMU（与底盘中心重合，方便对比）
+         ══════════════════════════════════════════════════════ -->
+    <link name="imu_link">
+        <inertial>
+            <mass value="0.01"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <inertia ixx="1e-6" ixy="0.0" ixz="0.0"
+                     iyy="1e-6" iyz="0.0" izz="1e-6"/>
+        </inertial>
+    </link>
+
+    <joint name="base_to_imu_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="imu_link"/>
+        <origin xyz="0 0 0.02" rpy="0 0 0"/>
+    </joint>
+
+    <!-- ══════════════════════════════════════════════════════
+         ros2_control：差速底盘（SystemInterface）
+         ══════════════════════════════════════════════════════ -->
+    <ros2_control name="DiffDriveSystem" type="system">
+
+        <hardware>
+            <plugin>my_robot_control/DiffDriveHardware</plugin>
+
+            <!-- velocity：速度指令（闭环）；effort：纯力矩指令 -->
+            <param name="motor_mode">$(arg motor_mode)</param>
+            <!-- 电机物理模型 -->
+            <param name="motor_inertia">$(arg motor_inertia)</param>
+            <param name="viscous_friction">$(arg viscous_friction)</param>
+            <param name="vel_gain">$(arg vel_gain)</param>
+            <param name="max_effort">$(arg max_effort)</param>
+            <!-- 传感器与几何 -->
+            <param name="encoder_cpr">$(arg encoder_cpr)</param>
+            <param name="wheel_separation">${wheel_separation}</param>
+            <param name="wheel_radius">${wheel_radius}</param>
+        </hardware>
+
+        <joint name="left_wheel_joint">
+            <command_interface name="velocity"/>
+            <command_interface name="effort"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+            <state_interface name="effort"/>
+        </joint>
+
+        <joint name="right_wheel_joint">
+            <command_interface name="velocity"/>
+            <command_interface name="effort"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+            <state_interface name="effort"/>
+        </joint>
+
+    </ros2_control>
+
+    <!-- ══════════════════════════════════════════════════════
+         ros2_control：IMU（SensorInterface，只读，没有指令接口）
+         ══════════════════════════════════════════════════════ -->
+    <ros2_control name="ImuSensor" type="sensor">
+
+        <hardware>
+            <plugin>my_robot_control/ImuSensor</plugin>
+            <param name="noise_stddev">0.01</param>
+            <param name="bias">0.001</param>
+            <param name="seed">42</param>
+            <param name="wheel_radius">${wheel_radius}</param>
+        </hardware>
+
+        <sensor name="imu_sensor">
+            <state_interface name="orientation.x"/>
+            <state_interface name="orientation.y"/>
+            <state_interface name="orientation.z"/>
+            <state_interface name="orientation.w"/>
+            <state_interface name="angular_velocity.x"/>
+            <state_interface name="angular_velocity.y"/>
+            <state_interface name="angular_velocity.z"/>
+            <state_interface name="linear_acceleration.x"/>
+            <state_interface name="linear_acceleration.y"/>
+            <state_interface name="linear_acceleration.z"/>
+        </sensor>
+
+    </ros2_control>
 
 </robot>

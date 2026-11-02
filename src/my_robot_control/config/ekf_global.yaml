@@ -1,0 +1,46 @@
+# 第 2 级 EKF：在 map 系内融合「AMCL 绝对位姿 + ekf_local 速度」，接管 map -> odom
+#
+# 为什么要单独一级：
+#   ekf_local 工作在 odom 系（连续、平滑、但会漂）；
+#   AMCL 给的是 map 系下的绝对位姿（不漂、但会跳、且静止时被门控不发）。
+#   两级分开后，odom -> base_link 由第 1 级负责（高频连续），
+#   map -> odom 由第 2 级负责（低频修正），互不干扰。
+ekf_global:
+  ros__parameters:
+    use_sim_time: false
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: map             # ★ 在 map 系内融合
+    publish_tf: true             # ★ 接管 map -> odom
+                                 #   （nav2_params_standalone.yaml 里 amcl tf_broadcast 已设 false）
+
+    publish_acceleration: false
+
+    # ---- 输入 1：AMCL 的 map 系绝对位姿 ----
+    # 注意：/amcl_pose 受 update_min_d(0.25) / update_min_a(0.2) 门控，
+    #       车静止时根本不发。所以不能只靠它，必须配合 odom0 的速度。
+    pose0: /amcl_pose
+    pose0_config: [true,  true,  false,     # x, y, z
+                   false, false, false,     # roll, pitch, yaw  ← 由 odom0 的 vyaw 负责
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    pose0_differential: false
+    pose0_relative: false
+    pose0_queue_size: 10
+
+    # ---- 输入 2：第 1 级 EKF 的输出，只取速度 ----
+    odom0: /odometry/local
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,     # vx
+                   false, false, true,      # vyaw
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10

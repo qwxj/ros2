@@ -21,6 +21,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 # 编译动态库
 add_library(my_robot_control SHARED
     src/diff_drive_hardware.cpp
+    src/imu_sensor.cpp
 )
 
 # 头文件目录

@@ -1,0 +1,47 @@
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+
+    # ---- 坐标系 ----
+    base_frame_id: base_link
+    odom_frame_id: odom
+    transform_tolerance: 0.5
+
+    # ---- 接入点：watchdog 之后，适配器之前 ----
+    #   /cmd_vel -> [watchdog] -> /cmd_vel_safe -> [collision_monitor] -> /cmd_vel_final -> 适配器
+    cmd_vel_in_topic: cmd_vel_safe
+    cmd_vel_out_topic: cmd_vel_final
+
+    # ---- 数据超时（激光断了就停车）----
+    source_timeout: 2.0
+    stop_pub_timeout: 2.0
+    base_shift_correction: true
+
+    # ---- 两个区域 ----
+    polygons: ["PolygonStop", "PolygonSlow"]
+
+    # 急停区：车头前方 0.28 m 以内有东西 -> 输出零
+    PolygonStop:
+      type: polygon
+      points: [0.28, 0.22, 0.28, -0.22, -0.10, -0.22, -0.10, 0.22]
+      action_type: stop
+      visualize: true
+      polygon_pub_topic: polygon_stop
+      enabled: true
+
+    # 减速区：车头前方 0.70 m 以内 -> 速度乘 0.4
+    PolygonSlow:
+      type: polygon
+      points: [0.70, 0.35, 0.70, -0.35, -0.20, -0.35, -0.20, 0.35]
+      action_type: slowdown
+      slowdown_ratio: 0.4
+      visualize: true
+      polygon_pub_topic: polygon_slowdown
+      enabled: true
+
+    # ---- 观察源 ----
+    observation_sources: ["scan"]
+    scan:
+      type: scan
+      topic: /scan
+      enabled: true

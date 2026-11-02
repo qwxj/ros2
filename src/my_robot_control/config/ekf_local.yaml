@@ -1,0 +1,46 @@
+# 第 1 级 EKF：在 odom 系内融合「轮式里程计 + IMU」，接管 odom -> base_link
+#
+# 为什么要有这一级：
+#   diff_drive_controller 只用轮速积分，打滑就废；IMU 的 vyaw 不受打滑影响。
+#   融合后既保留轮式的线性速度精度，又抑制 yaw 漂移。
+ekf_local:
+  ros__parameters:
+    use_sim_time: false          # 本包不用 Gazebo，走墙钟
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom            # ★ 只在 odom 系内融合
+    publish_tf: true             # ★ 接管 odom -> base_link
+                                 #   （controllers.yaml 里 enable_odom_tf 已设 false）
+
+    publish_acceleration: false
+
+    # ---- 输入 1：轮式里程计 ----
+    # 只取速度，不取位置：位置由本滤波器自己积分，避免和轮式位置重复计数
+    odom0: /odom
+    odom0_config: [false, false, false,     # x, y, z
+                   false, false, false,     # roll, pitch, yaw
+                   true,  false, false,     # vx, vy, vz     ← vy 恒为 0，不取
+                   false, false, true,      # vroll, vpitch, vyaw
+                   false, false, false]     # ax, ay, az
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # ---- 输入 2：IMU ----
+    # 只取 vyaw：仿真的 orientation 是从真值直接算的（等于作弊），
+    # 真实 IMU 的 orientation 也是滤波器算出来的，不能反过来喂给 EKF
+    imu0: /imu_sensor_broadcaster/imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,       # ★ 只取 vyaw
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: true

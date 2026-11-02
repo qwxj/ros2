@@ -1,17 +1,22 @@
-
 <?xml version="1.0"?>
-
 <library path="my_robot_control">
 
-    <class
-        name="my_robot_control/DiffDriveHardware"
-        type="my_robot_control::DiffDriveHardware"
-        base_class_type="hardware_interface::SystemInterface">
+  <class
+      name="my_robot_control/DiffDriveHardware"
+      type="my_robot_control::DiffDriveHardware"
+      base_class_type="hardware_interface::SystemInterface">
+    <description>
+      模拟差速底盘：力矩驱动 + 转动惯量 + 粘滞摩擦，4096 线编码器量化。
+    </description>
+  </class>
 
-        <description>
-            A simulated differential drive hardware interface.
-        </description>
-
-    </class>
+  <class
+      name="my_robot_control/ImuSensor"
+      type="my_robot_control::ImuSensor"
+      base_class_type="hardware_interface::SensorInterface">
+    <description>
+      模拟 IMU：从进程内 ground_truth 取真实偏航率，叠加偏置与白噪声。
+    </description>
+  </class>
 
 </library>

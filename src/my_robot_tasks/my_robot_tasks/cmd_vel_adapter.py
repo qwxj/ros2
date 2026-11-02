@@ -16,6 +16,12 @@ ros2_control 的每个控制器都是独立节点，话题用「私有命名」�
 而 Nav2 / teleop / 录包工具用的都是标准的 /cmd_vel 和 /odom。
 本节点做双向转发，让上层只用标准话题，不关心底层是 ros2_control 还是 Gazebo。
 
+参数
+----
+input_topic   下行入口话题，默认 /cmd_vel_final
+              （接了安全链之后，真正的「最后一道」是 collision_monitor 的输出；
+               如果是裸跑没有安全链，把它设成 /cmd_vel 即可）
+
 注意
 ----
 - use_stamped_vel: false 时订阅名是 cmd_vel_unstamped；
@@ -32,10 +38,13 @@ class CmdVelAdapter(Node):
     def __init__(self):
         super().__init__('cmd_vel_adapter')
 
-        # ── 下行：/cmd_vel  ->  /diff_drive_controller/cmd_vel_unstamped ──
+        self.declare_parameter('input_topic', '/cmd_vel_final')
+        in_topic = self.get_parameter('input_topic').value
+
+        # ── 下行：(可配置话题)  ->  /diff_drive_controller/cmd_vel_unstamped ──
         self.pub_cmd = self.create_publisher(
             Twist, '/diff_drive_controller/cmd_vel_unstamped', 10)
-        self.create_subscription(Twist, '/cmd_vel', self.on_cmd, 10)
+        self.create_subscription(Twist, in_topic, self.on_cmd, 10)
 
         # ── 上行：/diff_drive_controller/odom  ->  /odom ──
         self.pub_odom = self.create_publisher(Odometry, '/odom', 10)
@@ -48,8 +57,8 @@ class CmdVelAdapter(Node):
 
         self.get_logger().info(
             'cmd_vel_adapter 已启动：\n'
-            '  下行 /cmd_vel -> /diff_drive_controller/cmd_vel_unstamped\n'
-            '  上行 /diff_drive_controller/odom -> /odom')
+            '  下行 %s -> /diff_drive_controller/cmd_vel_unstamped\n'
+            '  上行 /diff_drive_controller/odom -> /odom' % in_topic)
 
     def on_cmd(self, msg: Twist):
         self.pub_cmd.publish(msg)
