@@ -1,0 +1,171 @@
+<?xml version="1.0"?>
+<robot name="diff_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- 机器人底盘 -->
+    <!-- 机器人底盘 -->
+    <link name="base_link">
+
+        <!-- 外观 -->
+        <visual>
+            <geometry>
+                <box size="0.30 0.25 0.10"/>
+            </geometry>
+
+            <material name="blue">
+                <color rgba="0.1 0.3 0.8 1.0"/>
+            </material>
+        </visual>
+
+        <!-- 碰撞模型 -->
+        <collision>
+            <geometry>
+                <box size="0.30 0.25 0.10"/>
+            </geometry>
+        </collision>
+
+        <!-- 惯性参数 -->
+        <inertial>
+            <mass value="5.0"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <inertia
+                ixx="0.0354"
+                ixy="0.0"
+                ixz="0.0"
+                iyy="0.0500"
+                iyz="0.0"
+                izz="0.0563"/>
+        </inertial>
+
+    </link>
+
+    <!-- 左轮 -->
+    <link name="left_wheel_link">
+        <!-- 外观 -->
+        <visual>
+            <origin rpy="1.5708 0 0"/>
+            <geometry>
+                <cylinder radius="0.05" length="0.025"/>
+            </geometry>
+            <material name="black">
+                <color rgba="0.1 0.1 0.1 1.0"/>
+            </material>
+        </visual>
+
+        <!-- 碰撞模型 -->
+        <collision>
+            <origin rpy="1.5708 0 0"/>
+            <geometry>
+                <cylinder radius="0.05" length="0.025"/>
+            </geometry>
+        </collision>
+
+        <!-- 惯性参数 -->
+        <inertial>
+            <mass value="0.5"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <inertia
+                ixx="0.000323"
+                ixy="0.0"
+                ixz="0.0"
+                iyy="0.000625"
+                iyz="0.0"
+                izz="0.000323"/>
+        </inertial>
+
+    </link>
+
+    <!-- 右轮 -->
+    <link name="right_wheel_link">
+        <visual>
+            <origin rpy="1.5708 0 0"/>
+            <geometry>
+                <cylinder radius="0.05" length="0.025"/>
+            </geometry>
+            <material name="black">
+                <color rgba="0.1 0.1 0.1 1.0"/>
+            </material>
+        </visual>
+    </link>
+
+    <!-- 左轮关节 -->
+    <joint name="left_wheel_joint" type="continuous">
+        <parent link="base_link"/>
+        <child link="left_wheel_link"/>
+        <origin xyz="0 0.15 -0.05" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/>
+    </joint>
+
+    <!-- 右轮关节 -->
+    <joint name="right_wheel_joint" type="continuous">
+        <parent link="base_link"/>
+        <child link="right_wheel_link"/>
+        <origin xyz="0 -0.15 -0.05" rpy="0 0 0"/>
+        <axis xyz="0 1 0"/>
+    </joint>
+
+    <!-- ros2_control 硬件接口 -->
+    <ros2_control name="DiffDriveSystem" type="system">
+
+        <hardware>
+            <plugin>my_robot_control/DiffDriveHardware</plugin>
+        </hardware>
+
+        <joint name="left_wheel_joint">
+            <command_interface name="velocity"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+        </joint>
+
+        <joint name="right_wheel_joint">
+            <command_interface name="velocity"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+        </joint>
+
+    </ros2_control>
+
+
+    <!-- 激光雷达 -->
+    <link name="laser_link">
+
+        <visual>
+            <!-- 雷达外壳 -->
+            <geometry>
+                <cylinder radius="0.04" length="0.04"/>
+            </geometry>
+
+            <material name="orange">
+                <color rgba="1.0 0.4 0.0 1.0"/>
+            </material>
+        </visual>
+
+        <collision>
+            <geometry>
+                <cylinder radius="0.04" length="0.04"/>
+            </geometry>
+        </collision>
+
+        <inertial>
+            <mass value="0.2"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <inertia
+                ixx="0.000137"
+                ixy="0.0"
+                ixz="0.0"
+                iyy="0.000137"
+                iyz="0.0"
+                izz="0.000160"/>
+        </inertial>
+
+    </link>
+
+    <!-- 雷达固定关节 -->
+    <joint name="base_to_laser_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="laser_link"/>
+
+        <!-- 雷达安装在底盘中心上方 -->
+        <origin xyz="0.10 0 0.08" rpy="0 0 0"/>
+    </joint>
+
+</robot>

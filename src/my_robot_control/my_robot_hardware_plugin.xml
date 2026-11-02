@@ -1,0 +1,17 @@
+
+<?xml version="1.0"?>
+
+<library path="my_robot_control">
+
+    <class
+        name="my_robot_control/DiffDriveHardware"
+        type="my_robot_control::DiffDriveHardware"
+        base_class_type="hardware_interface::SystemInterface">
+
+        <description>
+            A simulated differential drive hardware interface.
+        </description>
+
+    </class>
+
+</library>

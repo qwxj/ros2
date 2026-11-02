@@ -512,6 +512,21 @@ ament_target_dependencies(image_processor rclcpp sensor_msgs cv_bridge)
 target_link_libraries(image_processor ${OpenCV_LIBS})
 
 
+# 使用 lookupTransform 查询坐标系变换
+add_executable(
+    tf2_lookup_transform_demo
+    src/tf2_lookup_transform_demo.cpp
+)
+
+ament_target_dependencies(
+    tf2_lookup_transform_demo
+    rclcpp
+    geometry_msgs
+    tf2
+    tf2_ros
+)
+
+
 # ============================================================
 # 十、安装所有可执行程序
 # ============================================================
@@ -540,6 +555,9 @@ install(
     tf2_point_transform_demo
     tf2_odom_broadcaster_demo
     
+    # 做坐标转换对比
+    tf2_lookup_transform_demo
+
     # 旋转四元数
     quaternion_demo
     # 模拟发布障碍信息

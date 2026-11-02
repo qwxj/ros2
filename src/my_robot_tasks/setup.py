@@ -30,6 +30,7 @@ setup(
             'odom_noise = my_robot_tasks.odom_noise:main',
             'red_target_detector = my_robot_tasks.red_target_detector:main',
             'go_to_target = my_robot_tasks.go_to_target:main',
+            'cmd_vel_adapter = my_robot_tasks.cmd_vel_adapter:main',
         ],
     },
 )
