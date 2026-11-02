@@ -946,6 +946,7 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] 两级 EKF：`ekf_local` 接管 `odom→base_footprint`（30 Hz）+ `ekf_global` 接管 `map→odom`（28 Hz）
 - [x] 第 ⑤ 步：单级 vs 两级实测（`map→odom` 24 Hz vs 9 Hz；单步跳变相近，融合不平滑硬跳变）
 - [ ] 查清 `use_composition: True` 为何让容器内节点 DDS 实体不可见（试非 isolated 容器 / 默认传输 / CycloneDDS）
+- [ ] 修 docs 拆分的两处排版瑕疵：① README 索引表里单节显示成 `§25~§25`（应为 `§25`）；② 每个 `docs/features/*.md` 的首个 `###` 标题后多一个空行
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
 
 ## 调试经验（踩坑记录）
