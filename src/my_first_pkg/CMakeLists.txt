@@ -57,6 +57,9 @@ find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 
+find_package(nav_msgs REQUIRED)
+
+find_package(std_srvs REQUIRED)
 
 include_directories(${OpenCV_INCLUDE_DIRS})
 
@@ -307,6 +310,7 @@ ament_target_dependencies(laser_point_publisher
   geometry_msgs
 )
 
+
 # 坐标转换节点
 add_executable(laser_point_transformer
   src/laser_point_transformer.cpp
@@ -527,6 +531,69 @@ ament_target_dependencies(
 )
 
 
+## 自测
+# 订阅消息，解析最近的障碍物，发布出去
+add_executable(NearestObstacle
+  src/test_nearestobstacle.cpp
+)
+
+ament_target_dependencies(NearestObstacle
+  rclcpp
+  sensor_msgs
+  std_msgs
+)
+
+# 定时器解析tf变换
+add_executable(PoseRepoter
+  src/test_posrepoter.cpp
+)
+
+ament_target_dependencies(PoseRepoter
+  rclcpp
+  tf2
+  tf2_ros
+  tf2_geometry_msgs 
+)
+
+# 状态机控制指定位置转圈
+add_executable(GoToPoint
+  src/test_gotopoint.cpp
+)
+
+ament_target_dependencies(GoToPoint
+  rclcpp
+  tf2
+  tf2_ros
+  tf2_geometry_msgs 
+  nav_msgs
+  geometry_msgs
+  std_msgs
+)
+
+
+# 一个服务，返回距离最近障碍物的角度与距离
+add_executable(ObStacleServer
+  src/test_obstacleserver.cpp
+)
+
+ament_target_dependencies(ObStacleServer
+  rclcpp
+  std_srvs
+  sensor_msgs
+)
+
+
+# 看门狗速度
+add_executable(CmdWatchDog
+  src/test_cmdwatchdog.cpp
+)
+
+ament_target_dependencies(CmdWatchDog
+  rclcpp
+  geometry_msgs
+)
+
+
 # ============================================================
 # 十、安装所有可执行程序
 # ============================================================
@@ -611,6 +678,19 @@ install(
 
     # 图像处理
     image_processor
+
+    ## 自测，自己写订阅发布代码
+    # 发布最近障碍距离
+    NearestObstacle
+    # 查询 map → base_link 并打印 (x, y, yaw)
+    PoseRepoter 
+    # 状态机控制机器人转圈
+    GoToPoint
+    # 实现服务，提供查询最近障碍物距离与角度的服务
+    ObStacleServer
+
+    # 看门狗速度
+    CmdWatchDog
 
   DESTINATION lib/${PROJECT_NAME}
 )
