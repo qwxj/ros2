@@ -963,9 +963,26 @@ pgrep -a gzserver                           # 确认服务端还活着
 - [x] launch 参数化与一键启动（`bringup_all.launch.py`，一条命令 18 秒全栈就绪）
 - [x] 两级 EKF：`ekf_local` 接管 `odom→base_footprint`（30 Hz）+ `ekf_global` 接管 `map→odom`（28 Hz）
 - [x] 第 ⑤ 步：单级 vs 两级实测（`map→odom` 24 Hz vs 9 Hz；单步跳变相近，融合不平滑硬跳变）
+- [x] **`ros2_control` 自写硬件接口**：`SystemInterface` + pluginlib + `ament_export_targets(HAS_LIBRARY_TARGET)` + `controller_manager`(100 Hz) + `diff_drive_controller` + 自写 ray-casting 激光模拟器 + 程序化地图 + AMCL（不用 Gazebo，§33）
+- [x] **`ros2_control` 进阶 8 项**：电机惯性 `dω/dt=(τ−bω)/J`（63% 上升 300 ms/理论 244 ms）、4096 线编码器量化（偏差 4.55e-13）、`SensorInterface` IMU（100 Hz）、完整生命周期、`HW_IF_EFFORT` 状态+指令（0.30 N·m → 1.098 rad/s = `6(1−e^−t/10)`）、安全链三层串联、两级 EKF（`map→odom` 22.4 Hz / 导航距目标 0.100 m）、`switch_controllers` 热切换（§34）
 - [ ] 查清 `use_composition: True` 为何让容器内节点 DDS 实体不可见（试非 isolated 容器 / 默认传输 / CycloneDDS）
 - [ ] 修 docs 拆分的两处排版瑕疵：① README 索引表里单节显示成 `§25~§25`（应为 `§25`）；② 每个 `docs/features/*.md` 的首个 `###` 标题后多一个空行
 - [ ] 结合实际机器人场景完善传感器数据处理与节点协作
+- [ ] **`gazebo_ros2_control` 合体**：把 `my_robot_control` 的 `<plugin>` 换成 Gazebo 的，验证「同一套上层代码只换一个插件，就从纯运动学仿真变成物理仿真」
+- [ ] **真实硬件接口**：用串口 / CAN 驱动替换 `DiffDriveHardware`（保留 `read()`/`write()` 契约，上层零改动）
+- [ ] **GoogleTest**：给 `read()`/`write()` 写单元测试（纯数学，不需要 ROS；顺手覆盖编码器量化与力矩模型边界）
+- [ ] **自己写一个 Nav2 costmap layer 插件**（pluginlib + `Layer` 继承，补上「从用插件到写插件」这一步）
+- [ ] **自己写一个 controller 插件**（继承 `controller_interface::ControllerInterface`，比如带加速度限制的速度控制器）
+- [ ] **自定义 BT XML + 手动触发 Recovery 行为**（`behavior_server` 实操，面试高频）
+- [ ] **激光模拟器改为从 `map.pgm` 做 ray-casting**（DDA 在 occupancy grid 上走，学地图索引 ↔ 世界坐标换算）
+- [ ] **PCL 最小闭环**：订阅 `PointCloud2` → `VoxelGrid` 降采样 → `PassThrough` → 发布
+- [ ] **相机 + 激光雷达融合**：点云着色 / 障碍物关联，学时间同步与坐标系标定
+- [ ] **相机内参标定**（棋盘格）+ 手眼标定（仿真相机内参是给定的，实车必做）
+- [ ] **GitHub Actions CI**：`colcon build` + `pytest` + `colcon test`，提交即验证
+- [ ] **Docker 打包**整套仿真环境（ROS 2 + Gazebo + Nav2 依赖）
+- [ ] **任务层状态机**：正式 FSM 管理「导航 / 巡航 / 视觉任务 / 充电」的切换与中断恢复
+- [ ] **多机器人**：namespace + 多实例，学 TF 前缀与 `frame_prefix` 的坑
+- [ ] **CMake 库开发**：做一个被别的包 `find_package(...)` 消费的独立库（现已会用 `ament_export_targets`，缺消费端示例）
 
 ## 调试经验（踩坑记录）
 
