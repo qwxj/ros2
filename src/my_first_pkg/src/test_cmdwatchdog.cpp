@@ -42,13 +42,16 @@ private:
 
     void on_tick()
     {
-        std::lock_guard<std::mutex> lk(mtx_);
-        const double age = std::chrono::duration<double>(
-                                SteadyClock::now() - last_time_).count();
-        if(has_cmd_ && age > timeout_sec_)
         {
-            RCLCPP_WARN(get_logger(), "指令超时%.2fs,停车",age);
-            has_cmd_ = false;
+            std::lock_guard<std::mutex> lk(mtx_);
+            const double age = std::chrono::duration<double>(
+                                    SteadyClock::now() - last_time_).count();
+            if(has_cmd_ && age > timeout_sec_)
+            {
+                RCLCPP_WARN(get_logger(), "指令超时%.2fs,停车",age);
+                has_cmd_ = false;
+            }
+
         }
 
         pub_->publish(has_cmd_ ? last_cmd_ : geometry_msgs::msg::Twist{});

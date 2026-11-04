@@ -57,7 +57,7 @@ private:
         std::lock_guard<std::mutex> lk(mutex_);
         last_dist_ = best;
         last_angle_ = best_angle;
-        has_data_ = (best_idx > 0);
+        has_data_ = (best_idx >= 0);
         
     }
 
@@ -90,7 +90,7 @@ private:
 int main(int argc, char ** argv)
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::shared_ptr<ObStacleServer>());
+    rclcpp::spin(std::make_shared<ObStacleServer>());
     rclcpp::shutdown();
     return 0;
 }

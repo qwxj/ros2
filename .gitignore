@@ -25,3 +25,11 @@ frames_*.pdf
 __pycache__/
 *.pyc
 robot_localization_debug.txt
+
+# 本地 IDE 配置（c_cpp_properties 含机器相关绝对路径）
+.vscode/c_cpp_properties.json
+.vscode/settings.json
+
+# 编译数据库（由 tools/gen_compile_commands.sh 生成，切勿入库）
+compile_commands.json
+src/compile_commands.json
