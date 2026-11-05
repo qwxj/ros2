@@ -148,6 +148,10 @@ tools/                     # bag 指标、指令时间线等分析脚本
 | `docs/features/07-safety.md` | 四层安全链设计与实验 |
 | `docs/features/10-two-stage-ekf.md` | 两级 EKF |
 | `docs/features/11-ros2-control.md` | 硬件接口插件与踩坑 |
+| [`docs/notes/ros2-control-notes.md`](docs/notes/ros2-control-notes.md) | 接口声明、插件加载链路、缓冲规则与电机模型 |
+| [`docs/notes/tf2-notes.md`](docs/notes/tf2-notes.md) | TF 树规则、静态/动态、时间戳故障与四元数 |
+| [`docs/notes/behavior-tree-notes.md`](docs/notes/behavior-tree-notes.md) | 行为树语义、默认树与恢复行为 |
+| [`docs/notes/safety-and-comms.md`](docs/notes/safety-and-comms.md) | 速度指令安全链、QoS 选型、执行器与零拷贝 |
 
 ## License
 
