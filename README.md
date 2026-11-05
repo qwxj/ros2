@@ -1,8 +1,8 @@
 # ROS 2 移动机器人软件栈实践
 
-> 个人项目 · 2026.10 – 至今 · ROS 2 Humble / C++17 / Ubuntu 22.04
+> ROS 2 Humble / C++17 / Ubuntu 22.04
 
-一套**不依赖 Gazebo** 的差速移动机器人软件栈：自写 `ros2_control` 硬件接口插件驱动底盘，Nav2 + AMCL 负责定位导航，两级 EKF 融合轮速与 IMU，话题级安全链兜住失效场景。仓库同时保留 ROS 2 通信机制的基础示例与完整实验记录。
+一套差速移动机器人软件栈，包含两条演进线路：**早期用 Gazebo 做物理仿真**（URDF/xacro + world + 传感器插件），**后期改成自写 `ros2_control` 硬件接口 + ray-cast 激光模拟**的轻量仿真——不依赖 Gazebo、启动约 3 秒，承载 Nav2 + AMCL 导航、两级 EKF 融合与话题级安全链。两条线路都保留在仓库里，配置互不通用。
 
 ## 能力一览
 
@@ -104,16 +104,23 @@ ros2 launch my_robot_description bringup_all.launch.py
 
 ```
 src/
-├── my_robot_control/      # 主线：ros2_control 硬件插件、Nav2、两级 EKF、安全链
+├── my_robot_control/      # 主线：ros2_control 硬件插件、Nav2、两级 EKF、安全链（不依赖 Gazebo）
 ├── my_robot_tasks/        # 任务层：航点巡逻、视觉目标导航、里程计噪声注入
 ├── my_robot_description/  # Gazebo 仿真线：URDF/xacro、world、仿真侧 nav2/ekf 配置
 ├── my_robot_interfaces/   # 自定义 msg / srv
-└── my_first_pkg/          # 基础示例（Topic/Service/Action/QoS/Executor/TF2 等 35 个 demo，见 §基础示例）
+├── my_first_pkg/          # 基础示例（Topic/Service/Action/QoS/Executor/TF2 等 35 个 demo）
+├── robot_math/            # 纯 C++ 运动学库（不依赖 rclcpp，可被 gtest 直接测）
+├── robot_math_demo/       # 消费 robot_math 的 find_package 导出链路示例
+└── qos_lab/               # QoS 兼容性矩阵与 lifespan 实验
 docs/features/             # 各模块设计与实验记录（11 篇）
+docs/learning/             # L0 工程层 / L1 通信层学习笔记
+docs/notes/                # ros2_control / TF2 / 行为树 / 安全与通信速查
 tools/                     # bag 指标、指令时间线等分析脚本
 ```
 
 ## 两条技术线路（配置不通用，务必先看）
+
+**演进方向**：最早用 Gazebo（线路 B）验证行为；为了摆脱 Gazebo 的重依赖、启动慢和 `/clock` 节流问题，后期改写成自写硬件接口 + ray-cast 的轻量仿真（线路 A），并作为主线继续演进。
 
 仓库里有两条并行线路，**同名配置文件内容不同，不能混用**：
 
@@ -152,6 +159,9 @@ tools/                     # bag 指标、指令时间线等分析脚本
 | [`docs/notes/tf2-notes.md`](docs/notes/tf2-notes.md) | TF 树规则、静态/动态、时间戳故障与四元数 |
 | [`docs/notes/behavior-tree-notes.md`](docs/notes/behavior-tree-notes.md) | 行为树语义、默认树与恢复行为 |
 | [`docs/notes/safety-and-comms.md`](docs/notes/safety-and-comms.md) | 速度指令安全链、QoS 选型、执行器与零拷贝 |
+| [`docs/learning/L0-ament-colcon.md`](docs/learning/L0-ament-colcon.md) | 一个包从源码到 `ros2 run` 的全链路（含 4 个实验） |
+| [`docs/learning/L1-qos.md`](docs/learning/L1-qos.md) | QoS 七个策略、兼容性规则与自检题 |
+| [`docs/learning/L1-dds-discovery.md`](docs/learning/L1-dds-discovery.md) | DDS 分层、发现三阶段与故障树 |
 
 ## License
 
