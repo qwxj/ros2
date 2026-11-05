@@ -7,7 +7,7 @@ namespace qos_lab
 
 rclcpp::QoS declare_qos(rclcpp::Node & node, const std::string & prefix)
 {
-  auto text = [&node, &prefix](const std::string & key, const std::string & fallback) {
+  auto text = [&node, &prefix](const std::string & key, const std::string & fallback) -> std::string {
       const std::string name = prefix + key;
       if (!node.has_parameter(name)) {
         return node.declare_parameter<std::string>(name, fallback);
@@ -15,7 +15,7 @@ rclcpp::QoS declare_qos(rclcpp::Node & node, const std::string & prefix)
       return node.get_parameter(name).as_string();
     };
 
-  auto integer = [&node, &prefix](const std::string & key, int fallback) {
+  auto integer = [&node, &prefix](const std::string & key, int fallback) -> int {
       const std::string name = prefix + key;
       if (!node.has_parameter(name)) {
         return node.declare_parameter<int>(name, fallback);
