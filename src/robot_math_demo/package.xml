@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>robot_math_demo</name>
+  <version>0.1.0</version>
+  <description>L0 练习：消费 robot_math 的节点，验证 find_package + imported target 这条链路。</description>
+  <maintainer email="qwxj@users.noreply.github.com">wxj</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>robot_math</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
