@@ -68,7 +68,13 @@ public:
   {
     if (!has_first_scan_ || map_path_.empty()) {return;}
     MapMetadata meta;
-    meta.image = map_path_ + ".pgm";
+    // ★ 只写【文件名】，不写绝对路径。
+    //   标准 ROS 地图的 image 字段是相对 yaml 所在目录的，
+    //   这样 yaml + pgm 可以一起拷到任何机器 / 进 git 仓库。
+    const size_t slash = map_path_.find_last_of('/');
+    meta.image = (slash == std::string::npos)
+      ? (map_path_ + ".pgm")
+      : (map_path_.substr(slash + 1) + ".pgm");
     meta.resolution = map_->resolution();
     meta.origin_x = map_->originX();
     meta.origin_y = map_->originY();
