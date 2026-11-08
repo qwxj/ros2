@@ -1,5 +1,7 @@
 #include "mini_slam/particle_filter.hpp"
 
+#include "mini_slam/distance_field.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -80,30 +82,7 @@ void ParticleFilter::setMap(const OccupancyGrid & map)
   map_origin_x_ = map.originX();
   map_origin_y_ = map.originY();
 
-  std::vector<std::pair<int, int>> obstacles;
-  for (int gy = 0; gy < map_h_; ++gy) {
-    for (int gx = 0; gx < map_w_; ++gx) {
-      if (map.probability(gx, gy) > 50) {obstacles.emplace_back(gx, gy);}
-    }
-  }
-
-  const float kInf = 1e9f;
-  dist_field_.assign(static_cast<size_t>(map_w_) * map_h_, kInf);
-  if (!obstacles.empty()) {
-    for (int gy = 0; gy < map_h_; ++gy) {
-      for (int gx = 0; gx < map_w_; ++gx) {
-        float best = kInf;
-        for (const auto & o : obstacles) {
-          const float ddx = static_cast<float>(gx - o.first);
-          const float ddy = static_cast<float>(gy - o.second);
-          const float d2 = ddx * ddx + ddy * ddy;
-          if (d2 < best) {best = d2;}
-        }
-        dist_field_[static_cast<size_t>(gy) * map_w_ + gx] =
-          std::sqrt(best) * static_cast<float>(map_res_);
-      }
-    }
-  }
+  dist_field_ = buildDistanceField(map);
   has_map_ = true;
 }
 

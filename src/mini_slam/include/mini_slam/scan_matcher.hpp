@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "mini_slam/occupancy_grid.hpp"
+#include "mini_slam/pose2d.hpp"
 
 namespace mini_slam
 {

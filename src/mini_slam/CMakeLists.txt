@@ -10,11 +10,18 @@ find_package(ament_cmake REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
+find_package(rclcpp REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+
 # ============================================================
 # 核心库：纯 C++，零 ROS 依赖 → 可被 gtest 秒测
 # ============================================================
 add_library(mini_slam_core
   src/occupancy_grid.cpp
+  src/distance_field.cpp
   src/ekf.cpp
   src/particle_filter.cpp
   src/scan_matcher.cpp
@@ -27,6 +34,27 @@ target_include_directories(mini_slam_core PUBLIC
 )
 target_link_libraries(mini_slam_core PUBLIC Eigen3::Eigen yaml-cpp)
 target_compile_options(mini_slam_core PRIVATE -Wall -Wextra)
+
+# ============================================================
+# ROS 节点（把算法接成能跑的东西）
+# ============================================================
+set(MINI_SLAM_DEPS rclcpp nav_msgs sensor_msgs geometry_msgs tf2_ros)
+
+add_executable(ekf_node src/ekf_node.cpp)
+target_link_libraries(ekf_node mini_slam_core)
+ament_target_dependencies(ekf_node ${MINI_SLAM_DEPS})
+
+add_executable(amcl_mini_node src/amcl_mini_node.cpp)
+target_link_libraries(amcl_mini_node mini_slam_core)
+ament_target_dependencies(amcl_mini_node ${MINI_SLAM_DEPS})
+
+add_executable(slam_mini_node src/slam_mini_node.cpp)
+target_link_libraries(slam_mini_node mini_slam_core)
+ament_target_dependencies(slam_mini_node ${MINI_SLAM_DEPS})
+
+install(TARGETS ekf_node amcl_mini_node slam_mini_node
+  DESTINATION lib/${PROJECT_NAME})
+
 
 # ============================================================
 # 测试
