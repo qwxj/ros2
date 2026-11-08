@@ -1,0 +1,20 @@
+# 大型差速车：360 线激光、惯性大、场地大、算力充足
+amcl_mini:
+  ros__parameters:
+    max_beams: 180
+    sigma_hit: 0.20
+    max_dist: 1.20
+    min_particles: 500
+    max_particles: 4000
+    # 大车重、刹车距离长、打滑多
+    alpha1: 0.20
+    alpha2: 0.05
+    alpha3: 0.20
+    alpha4: 0.05
+
+slam_mini:
+  ros__parameters:
+    map_size_m: 20.0
+    resolution: 0.10
+    search_xy: 0.30
+    search_yaw: 0.25

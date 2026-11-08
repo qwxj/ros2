@@ -1,0 +1,20 @@
+# 小型差速车：128 线激光、噪声小、场地小、算力紧
+amcl_mini:
+  ros__parameters:
+    max_beams: 64
+    sigma_hit: 0.05
+    max_dist: 0.60
+    min_particles: 200
+    max_particles: 1200
+    # 小车轻、打滑少
+    alpha1: 0.03
+    alpha2: 0.01
+    alpha3: 0.03
+    alpha4: 0.01
+
+slam_mini:
+  ros__parameters:
+    map_size_m: 8.0
+    resolution: 0.05
+    search_xy: 0.10
+    search_yaw: 0.10

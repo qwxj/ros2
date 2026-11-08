@@ -82,6 +82,9 @@ if(BUILD_TESTING)
 
 endif()
 
+install(DIRECTORY config launch
+  DESTINATION share/${PROJECT_NAME})
+
 install(DIRECTORY include/ DESTINATION include)
 install(TARGETS mini_slam_core
   EXPORT export_mini_slam

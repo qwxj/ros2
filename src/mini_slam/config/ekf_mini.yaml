@@ -1,0 +1,13 @@
+# EKF 通用默认参数
+ekf_mini:
+  ros__parameters:
+    odom_topic: /odom
+    imu_topic: /imu
+    output_topic: /odometry/filtered
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: true
+    frequency: 30.0
+    sigma_v: 0.05
+    sigma_w: 0.05
+    sigma_yaw_rate: 0.02

@@ -1,0 +1,22 @@
+# SLAM 通用默认参数
+# 加载顺序：本文件 → config/robots/<robot>.yaml（后者覆盖前者同名项）
+slam_mini:
+  ros__parameters:
+    scan_topic: /scan
+    odom_topic: /odom
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: true
+
+    # 地图
+    resolution: 0.05
+    map_size_m: 10.0
+    publish_period: 2.0
+    map_path: /home/wxj/mini_map
+
+    # 扫描匹配（由粗到细相关性搜索）
+    search_xy: 0.15
+    search_yaw: 0.15
+    search_steps: 7
+    min_score: 0.35

@@ -1,0 +1,41 @@
+# 定位（AMCL）通用默认参数
+amcl_mini:
+  ros__parameters:
+    scan_topic: /scan
+    map_topic: /map
+    odom_topic: /odom
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: true
+
+    # 粒子数（KLD 自适应）
+    max_particles: 2000
+    min_particles: 300
+    use_kld: true
+    kld_err: 0.05
+    kld_z: 0.99
+
+    # 观测模型（beam model）
+    sigma_hit: 0.15
+    max_dist: 1.0
+    max_beams: 120
+
+    # 运动模型噪声（见 config/robots/*.yaml 里的机型差异）
+    alpha1: 0.05
+    alpha2: 0.01
+    alpha3: 0.05
+    alpha4: 0.01
+
+    # recovery（随机注入）：正常定位必须关闭
+    enable_recovery: false
+    alpha_slow: 0.001
+    alpha_fast: 0.1
+
+    # 初始位姿
+    set_initial_pose: true
+    initial_x: 0.0
+    initial_y: 0.0
+    initial_yaw: 0.0
+    initial_sigma_xy: 0.10
+    initial_sigma_yaw: 0.08

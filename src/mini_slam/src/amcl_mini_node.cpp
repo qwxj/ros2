@@ -35,6 +35,20 @@ public:
     const double kld_z = declare_parameter<double>("kld_z", 0.99);
     alpha_slow_ = declare_parameter<double>("alpha_slow", 0.001);
     alpha_fast_ = declare_parameter<double>("alpha_fast", 0.1);
+
+    // ★ 运动模型噪声 alpha1~4（odom 差分模型）
+    //   这四个决定了"有多不信任里程计"，不同底盘差一个数量级：
+    //     差速轮（干净地面）  0.05 / 0.01 / 0.05 / 0.01   ← 默认
+    //     差速轮（打滑严重）  0.20 / 0.05 / 0.20 / 0.05
+    //     履带                0.30 / 0.10 / 0.30 / 0.10
+    //     全向轮              rot 小、trans 大：0.02 / 0.05 / 0.05 / 0.10
+    //   var_rot1  = alpha1*rot1^2 + alpha2*trans^2
+    //   var_trans = alpha3*trans^2 + alpha4*rot1^2 + alpha4*rot2^2
+    //   var_rot2  = alpha1*rot2^2 + alpha2*trans^2
+    alpha1_ = declare_parameter<double>("alpha1", 0.05);
+    alpha2_ = declare_parameter<double>("alpha2", 0.01);
+    alpha3_ = declare_parameter<double>("alpha3", 0.05);
+    alpha4_ = declare_parameter<double>("alpha4", 0.01);
     sigma_hit_ = declare_parameter<double>("sigma_hit", 0.15);
     max_dist_ = declare_parameter<double>("max_dist", 1.0);
     max_beams_ = declare_parameter<int>("max_beams", 120);
@@ -158,7 +172,7 @@ private:
       const double body_dx =  c * pending_dx_ + s * pending_dy_;
       const double body_dy = -s * pending_dx_ + c * pending_dy_;
 
-      pf_->predict(body_dx, body_dy, pending_dyaw_);
+      pf_->predict(body_dx, body_dy, pending_dyaw_, alpha1_, alpha2_, alpha3_, alpha4_);
       pending_dx_ = pending_dy_ = pending_dyaw_ = 0.0;
     }
 
@@ -237,6 +251,7 @@ private:
   std::string map_frame_, odom_frame_, base_frame_;
   bool publish_tf_{true};
   double alpha_slow_{0.001}, alpha_fast_{0.1};
+  double alpha1_{0.05}, alpha2_{0.01}, alpha3_{0.05}, alpha4_{0.01};
   double sigma_hit_{0.15}, max_dist_{1.0};
   int max_beams_{120};
   bool use_kld_{true};
