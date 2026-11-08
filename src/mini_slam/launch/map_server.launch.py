@@ -1,8 +1,8 @@
 """只启动地图服务（map_server + 自动激活），不启动定位算法。
 
 用法：
-    ros2 launch mini_slam map_server.launch.py                  # 包内 demo_map
-    ros2 launch mini_slam map_server.launch.py map:=demo_map    # 包内其它图
+    ros2 launch mini_slam map_server.launch.py                  # 默认 ~/mini_map.yaml
+    ros2 launch mini_slam map_server.launch.py map:=my_map      # 包内 maps/my_map.yaml
     ros2 launch mini_slam map_server.launch.py map:=/abs/x.yaml # 任意绝对路径
 
 启动后：
@@ -11,7 +11,7 @@
 
 map:= 支持三种写法：
     ① 绝对路径   /home/wxj/mini_map.yaml
-    ② 包内名字   demo_map          → <share>/mini_slam/maps/demo_map.yaml
+    ② 包内名字   my_map            → <share>/mini_slam/maps/my_map.yaml
     ③ 空字符串   ''                → 本 launch 直接报错（必须给图）
 """
 import os
@@ -81,7 +81,7 @@ def launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            'map', default_value='demo_map',
+            'map', default_value='/home/wxj/mini_map.yaml',
             description='地图：绝对路径 / 包内名字（maps/<name>.yaml）'),
         DeclareLaunchArgument(
             'use_sim_time', default_value='false'),

@@ -2,7 +2,7 @@
 
 用法：
     ros2 launch mini_slam amcl_mini.launch.py
-    ros2 launch mini_slam amcl_mini.launch.py map:=demo_map
+    ros2 launch mini_slam amcl_mini.launch.py map:=my_map
     ros2 launch mini_slam amcl_mini.launch.py map:=/home/wxj/mini_map.yaml
     ros2 launch mini_slam amcl_mini.launch.py map:=none       # 用外部的 /map
     ros2 launch mini_slam amcl_mini.launch.py robot:=diff_small
@@ -13,7 +13,7 @@
 
 map:= 支持三种写法：
     ① 绝对路径   /home/wxj/mini_map.yaml
-    ② 包内名字   demo_map          → <share>/mini_slam/maps/demo_map.yaml
+    ② 包内名字   my_map            → <share>/mini_slam/maps/my_map.yaml
     ③ none       none              → 不起地图服务，直接等外部的 /map
        （不用空字符串：ROS 2 launch 不接受 map:= 后面没有值，
           bash 也会把 '' 吃掉，只剩 map:= 会报 malformed launch argument）
@@ -126,8 +126,8 @@ def generate_launch_description():
             'robot', default_value='default',
             description='机型名，对应 config/robots/<robot>.yaml'),
         DeclareLaunchArgument(
-            'map', default_value='demo_map',
-            description='地图：绝对路径 / 包内名字 / none（不起地图服务）'),
+            'map', default_value='/home/wxj/mini_map.yaml',
+            description='地图：绝对路径 / 包内名字（maps/<name>.yaml）/ none'),
         DeclareLaunchArgument(
             'use_sim_time', default_value='false'),
         OpaqueFunction(function=launch_setup),
