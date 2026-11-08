@@ -93,7 +93,20 @@ double ParticleFilter::logLikelihood(const Particle & p,
                                      double sigma_hit,
                                      double max_dist) const
 {
+  // ★ AMCL 的 beam model（简化版）：
+  //     p = z_hit·exp(-d²/2σ²) + z_rand·(1/range_max)
+  //
+  //   为什么必须有 z_rand 这一项：
+  //     纯高斯下，一条"完全打偏"的光线贡献 log(exp(-22.2)) = -22.2，
+  //     128 条光线就是 -2842，而完全正确只有 0。
+  //     这个尖峰让权重瞬间被单个粒子吃掉 → 粒子瞬灭 → 一旦丢失就再也回不来。
+  //     加上均匀项（对应传感器噪声/动态障碍），最差光线只值 -5.07，
+  //     粒子云能保持多样性，过滤器才有恢复能力。
   const double inv_2sigma2 = 1.0 / (2.0 * sigma_hit * sigma_hit);
+  const double z_hit = 0.95;
+  const double z_rand = z_rand_;
+  const double rand_term = z_rand / std::max(range_max, 1e-3);
+
   double log_l = 0.0;
   int used = 0;
 
@@ -107,12 +120,18 @@ double ParticleFilter::logLikelihood(const Particle & p,
 
     const int gx = static_cast<int>(std::floor((ex - map_origin_x_) / map_res_));
     const int gy = static_cast<int>(std::floor((ey - map_origin_y_) / map_res_));
-    if (gx < 0 || gx >= map_w_ || gy < 0 || gy >= map_h_) {continue;}
+    if (gx < 0 || gx >= map_w_ || gy < 0 || gy >= map_h_) {
+      // 打到图外：按"最差"处理，但不能直接丢掉（丢掉会失去约束）
+      log_l += std::log(rand_term);
+      ++used;
+      continue;
+    }
 
     double d = dist_field_[static_cast<size_t>(gy) * map_w_ + gx];
     if (d > max_dist) {d = max_dist;}
 
-    log_l += -d * d * inv_2sigma2;
+    const double p_hit = std::exp(-d * d * inv_2sigma2);
+    log_l += std::log(z_hit * p_hit + rand_term);
     ++used;
   }
   if (used == 0) {return 0.0;}
@@ -138,7 +157,20 @@ void ParticleFilter::updateWeights(const std::vector<float> & ranges,
   }
   if (!std::isfinite(max_log)) {return;}
 
-  // ---------- recovery：用对数域的平均似然更新慢/快平均 ----------
+  // ---------- 归一化（乘进旧权重）----------
+  double sum = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    const double old_w = std::max(particles_[i].weight, 1e-300);
+    const double combined = std::log(old_w) + (log_w[i] - max_log);
+    particles_[i].weight = combined;
+    sum += std::exp(combined);
+  }
+  if (sum <= 0.0) {return;}
+
+  // ---------- recovery：未归一化的平均似然，在对数域上做慢/快平均 ----------
+  // 对应 AMCL 的 pf_update_sensor：w_avg += sample->weight（在除以 total 之前累加）
+  // 关键：w_fast / w_slow 是【比值】，所以绝对尺度会抵消，
+  //       真正被检测到的是"似然相对长期均值掉了多少"。
   double sum_exp = 0.0;
   for (size_t i = 0; i < n; ++i) {sum_exp += std::exp(log_w[i] - max_log);}
   const double log_w_avg = std::log(sum_exp / static_cast<double>(n)) + max_log;
@@ -151,16 +183,6 @@ void ParticleFilter::updateWeights(const std::vector<float> & ranges,
     log_w_slow_ += alpha_slow_ * (log_w_avg - log_w_slow_);
     log_w_fast_ += alpha_fast_ * (log_w_avg - log_w_fast_);
   }
-
-  // ---------- 归一化（乘进旧权重）----------
-  double sum = 0.0;
-  for (size_t i = 0; i < n; ++i) {
-    const double old_w = std::max(particles_[i].weight, 1e-300);
-    const double combined = std::log(old_w) + (log_w[i] - max_log);
-    particles_[i].weight = combined;
-    sum += std::exp(combined);
-  }
-  if (sum <= 0.0) {return;}
 
   const double log_sum = std::log(sum);
   for (auto & p : particles_) {p.weight = std::exp(p.weight - log_sum);}

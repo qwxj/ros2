@@ -65,8 +65,16 @@ public:
 
   // ---------------- 随机注入（recovery）----------------
   void setRecoveryParams(double alpha_slow, double alpha_fast);
+
+  /// beam model 里的均匀噪声权重（AMCL 的 laser_z_rand，默认 0.05）
+  ///   调大 → 似然更平坦 → 粒子更多样、更不容易瞬灭，但定位精度略降
+  void setBeamModelRand(double z_rand) {z_rand_ = z_rand;}
   void setUniformPoseFn(std::function<Pose2D()> fn);
   double injectionProbability() const;
+
+  /// 当前慢/快平均似然（调试用）
+  double wSlow() const {return log_w_slow_;}
+  double wFast() const {return log_w_fast_;}
 
   const std::vector<Particle> & particles() const { return particles_; }
   int numParticles() const { return static_cast<int>(particles_.size()); }
@@ -103,13 +111,15 @@ private:
   double bin_yaw_{0.10};
   int last_resample_count_{0};
 
-  // recovery（对数域上的慢/快平均）
+  // recovery：对数域上的慢/快平均似然（和 AMCL 的 pf_update_sensor 等价）
   double log_w_slow_{0.0};
   double log_w_fast_{0.0};
   double alpha_slow_{0.001};
   double alpha_fast_{0.1};
   bool recovery_initialized_{false};
   std::function<Pose2D()> uniform_pose_fn_;
+
+  double z_rand_{0.05};
 
   std::mt19937 rng_;
   bool initialized_{false};

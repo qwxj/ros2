@@ -2,10 +2,12 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <fstream>
-#include <sstream>
+#include <iterator>
+#include <string>
+#include <vector>
 
 namespace mini_slam
 {
@@ -34,14 +36,15 @@ int valueToPixel(int8_t value)
 }
 
 // ------------------------------------------------------------------
-// PGM（P5 = 二进制灰度）
-//   头部："P5\n<w> <h>\n<maxval>\n"  允许 # 注释
+// PGM 头部解析：支持 P2（ASCII）和 P5（二进制）
+//   格式："P2/P5 <w> <h> <maxval> <data>"，允许 # 注释
 // ------------------------------------------------------------------
 namespace
 {
 
 struct PgmHeader
 {
+  bool ascii{false};
   int w{0};
   int h{0};
   int maxval{255};
@@ -51,6 +54,7 @@ struct PgmHeader
 bool parsePgmHeader(const std::vector<char> & buf, PgmHeader & hdr, std::string * err)
 {
   size_t i = 0;
+
   auto skip_ws_and_comments = [&]() {
       while (i < buf.size()) {
         const char c = buf[i];
@@ -79,24 +83,23 @@ bool parsePgmHeader(const std::vector<char> & buf, PgmHeader & hdr, std::string 
       return true;
     };
 
-  // 魔数
   skip_ws_and_comments();
-  if (i + 1 >= buf.size() || buf[i] != 'P' || buf[i + 1] != '5') {
-    if (err) {*err = "not a P5 pgm (only binary P5 supported)";}
+  if (i + 1 >= buf.size() || buf[i] != 'P' || (buf[i + 1] != '5' && buf[i + 1] != '2')) {
+    if (err) {*err = "not a pgm (only P2/P5 supported)";}
     return false;
   }
+  hdr.ascii = (buf[i + 1] == '2');
   i += 2;
 
   if (!next_int(hdr.w) || !next_int(hdr.h) || !next_int(hdr.maxval)) {
     if (err) {*err = "bad pgm header";}
     return false;
   }
-  // 头部结束后必须正好一个空白字符
   if (i >= buf.size()) {
     if (err) {*err = "truncated pgm header";}
     return false;
   }
-  ++i;
+  ++i;                        // 头部与数据之间正好一个空白字符
   hdr.data_offset = i;
   return true;
 }
@@ -122,16 +125,51 @@ bool readPgm(const std::string & path, int & w, int & h,
   }
 
   const size_t need = static_cast<size_t>(hdr.w) * hdr.h;
-  if (buf.size() < hdr.data_offset + need) {
-    if (err) {*err = "truncated pixel data";}
-    return false;
-  }
-
   w = hdr.w;
   h = hdr.h;
   pixels.assign(need, 0);
-  for (size_t k = 0; k < need; ++k) {
-    pixels[k] = static_cast<uint8_t>(buf[hdr.data_offset + k]);
+
+  if (!hdr.ascii) {
+    // ---------- P5：直接拷贝二进制 ----------
+    if (buf.size() < hdr.data_offset + need) {
+      if (err) {*err = "truncated pixel data";}
+      return false;
+    }
+    for (size_t k = 0; k < need; ++k) {
+      pixels[k] = static_cast<uint8_t>(buf[hdr.data_offset + k]);
+    }
+    return true;
+  }
+
+  // ---------- P2：解析 ASCII 整数 ----------
+  size_t p = hdr.data_offset;
+  size_t k = 0;
+  while (k < need) {
+    while (p < buf.size()) {
+      const char c = buf[p];
+      if (c == '#') {
+        while (p < buf.size() && buf[p] != '\n') {++p;}
+      } else if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+        ++p;
+      } else {
+        break;
+      }
+    }
+    if (p >= buf.size()) {break;}
+    int v = 0;
+    bool any = false;
+    while (p < buf.size() && buf[p] >= '0' && buf[p] <= '9') {
+      v = v * 10 + (buf[p] - '0');
+      ++p;
+      any = true;
+    }
+    if (!any) {++p; continue;}
+    pixels[k++] = static_cast<uint8_t>(std::min(255, v));
+  }
+
+  if (k != need) {
+    if (err) {*err = "truncated ascii pixel data";}
+    return false;
   }
   return true;
 }
@@ -230,7 +268,6 @@ bool saveMap(const std::string & yaml_path, const OccupancyGrid & grid,
     }
   }
 
-  // pgm 路径 = yaml 同目录 + meta.image
   std::string img_path = meta.image;
   const size_t slash = yaml_path.find_last_of('/');
   if (slash != std::string::npos && (img_path.empty() || img_path[0] != '/')) {

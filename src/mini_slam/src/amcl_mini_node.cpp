@@ -53,7 +53,15 @@ public:
     }
     pf_->setRecoveryParams(alpha_slow_, alpha_fast_);
 
-    // 随机撒粒子：在地图范围内均匀
+    // ★ recovery（随机注入）默认【关闭】
+    //   它是给"绑架机器人"场景用的。正常定位时开着它，一旦机器人走进
+    //   地图没覆盖的区域（似然整体下滑），就会被误判成被绑架 →
+    //   整张图撒随机粒子 → 位姿乱跳。
+    //   要用的时候：-p enable_recovery:=true
+    const bool enable_recovery = declare_parameter<bool>("enable_recovery", false);
+
+    // 随机撒粒子：在地图范围内均匀（只有开了 recovery 才注册）
+    if (enable_recovery) {
     pf_->setUniformPoseFn([this]() {
         Pose2D p;
         if (!has_map_) {return p;}
@@ -63,6 +71,7 @@ public:
         p.x = ux(rng_); p.y = uy(rng_); p.yaw = ua(rng_);
         return p;
     });
+    }
 
     pf_->initialize(init_x_, init_y_, init_yaw_, init_sigma_xy, init_sigma_yaw);
 
@@ -139,8 +148,17 @@ private:
     }
 
     // 1. 用 odom 增量预测
+    //    ★ 关键：ParticleFilter::predict() 期望的是【车体系】增量，
+    //      而 odom 给的是【odom 系】增量。必须用上一刻的 odom 朝向把它转过来，
+    //      否则一旦转向，整段位移会被多旋转一个 yaw。
+    //      真实 AMCL 里这一步叫 delta_bearing = atan2(dy,dx) - old_odom_yaw
     if (pending_dx_ != 0.0 || pending_dy_ != 0.0 || pending_dyaw_ != 0.0) {
-      pf_->predict(pending_dx_, pending_dy_, pending_dyaw_);
+      const double c = std::cos(last_odom_.yaw);
+      const double s = std::sin(last_odom_.yaw);
+      const double body_dx =  c * pending_dx_ + s * pending_dy_;
+      const double body_dy = -s * pending_dx_ + c * pending_dy_;
+
+      pf_->predict(body_dx, body_dy, pending_dyaw_);
       pending_dx_ = pending_dy_ = pending_dyaw_ = 0.0;
     }
 

@@ -174,3 +174,30 @@ TEST(MapIo, LowerFreeThreshTurnsGrayIntoUnknown)
   ASSERT_TRUE(c.count(-1)) << "应该有未知格子了";
   EXPECT_EQ(c.at(-1), 1846) << "灰色像素 205 全部变成未知";
 }
+
+// ============================================================
+// 6. 读 P2（ASCII）格式的地图：my_robot_control 的 map.pgm
+//    P2 和 P5 都要支持 —— 前者是文本，后者是二进制，
+//    但 map_server 两者都吃，所以 map_io 也必须都吃
+// ============================================================
+TEST(MapIo, LoadP2AsciiMap)
+{
+  const std::string yaml = "/home/wxj/ros2/src/my_robot_control/maps/map.yaml";
+  std::ifstream probe(yaml);
+  if (!probe) {GTEST_SKIP() << "P2 地图不存在: " << yaml;}
+
+  OccupancyGrid g(0.05, 0, 0, 1, 1);
+  MapMetadata meta;
+  std::string err;
+  ASSERT_TRUE(mini_slam::loadMap(yaml, g, meta, &err)) << err;
+
+  EXPECT_EQ(g.width(), 200);
+  EXPECT_EQ(g.height(), 160);
+  EXPECT_NEAR(meta.origin_x, -5.0, 1e-9);
+  EXPECT_NEAR(meta.origin_y, -4.0, 1e-9);
+  EXPECT_NEAR(meta.free_thresh, 0.196, 1e-9);
+
+  const auto c = countValues(g);
+  printCounts(c, "P2 map (my_robot_control)");
+  EXPECT_GT(c.at(100), 100) << "应该有很多占据格";
+}
