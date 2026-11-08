@@ -27,7 +27,7 @@ colcon build --packages-select mini_slam
 4. 按名字引用：
 
 ```bash
-ros2 launch mini_slam map_server.launch.py map:=my_map
+ros2 launch mini_slam debug_map.launch.py map:=my_map
 ros2 launch mini_slam amcl_mini.launch.py map:=my_map
 ```
 

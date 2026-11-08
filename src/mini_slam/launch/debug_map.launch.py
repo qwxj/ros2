@@ -1,18 +1,24 @@
-"""只启动地图服务（map_server + 自动激活），不启动定位算法。
+"""【调试用】只启动地图服务（map_server + 自动激活），不启动定位算法。
+
+什么时候用：
+    · 地图文件加载失败，要单独验证（只起地图，日志干净）
+    · 只想在 RViz 里看一眼地图，不做定位
+    · 用 Nav2 做规划（不需要 amcl）
+
+平时定位只要一条命令就够，本文件不用起：
+    ros2 launch mini_slam amcl_mini.launch.py
+        ← 它内部已经起了 map_server + lifecycle_manager
 
 用法：
-    ros2 launch mini_slam map_server.launch.py                  # 默认 ~/mini_map.yaml
-    ros2 launch mini_slam map_server.launch.py map:=my_map      # 包内 maps/my_map.yaml
-    ros2 launch mini_slam map_server.launch.py map:=/abs/x.yaml # 任意绝对路径
+    ros2 launch mini_slam debug_map.launch.py                   # 默认 ~/mini_map.yaml
+    ros2 launch mini_slam debug_map.launch.py map:=my_map       # 包内 maps/my_map.yaml
+    ros2 launch mini_slam debug_map.launch.py map:=/abs/x.yaml  # 任意绝对路径
 
-启动后：
-    /map                                       （transient_local，晚加入也收得到）
-    /map_server/...                            （生命周期服务）
-
-map:= 支持三种写法：
+map:= 支持两种写法：
     ① 绝对路径   /home/wxj/mini_map.yaml
     ② 包内名字   my_map            → <share>/mini_slam/maps/my_map.yaml
-    ③ 空字符串   ''                → 本 launch 直接报错（必须给图）
+
+注意：本 launch 必须给地图，map:=none 在本文件里会直接报错。
 """
 import os
 
@@ -24,10 +30,12 @@ from launch_ros.actions import LifecycleNode, Node
 
 
 def resolve_map(spec):
-    """把 map:= 的写法解析成真实的 yaml 绝对路径。"""
+    """把 map:= 解析成 yaml 绝对路径。本 launch 必须给地图。"""
     spec = spec.strip()
-    if not spec:
-        raise RuntimeError('map:= 不能为空（本 launch 就是用来起地图服务的）')
+    if spec.lower() in ('', 'none', 'off'):
+        raise RuntimeError(
+            'debug_map.launch.py 必须给地图：map:=<绝对路径|包内名字>\n'
+            '（想起地图服务但不要地图，请直接用 amcl_mini.launch.py map:=none）')
 
     if os.path.isabs(spec):
         if not os.path.exists(spec):
@@ -56,7 +64,7 @@ def launch_setup(context, *args, **kwargs):
             package='nav2_map_server',
             executable='map_server',
             name='map_server',
-            namespace='',
+            namespace='',        # Humble 的 LifecycleNode 必须显式给
             output='screen',
             parameters=[{
                 'yaml_filename': map_yaml,
