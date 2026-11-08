@@ -104,6 +104,13 @@ public:
     pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
       "/amcl_pose", 10);
 
+    // 订阅 /initialpose：RViz 的 "2D Pose Estimate" 按钮发到这个话题
+    //   （也可以命令行 ros2 topic pub --once /initialpose ...）
+    //   收到后在【运行时】重新撒粒子，不用重启节点。
+    initial_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      "/initialpose", rclcpp::QoS(1),
+      [this](geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr m) {onInitialPose(m);});
+
     if (publish_tf_) {
       tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     }
@@ -151,6 +158,33 @@ private:
     pending_dy_ += now_pose.y - last_odom_.y;
     pending_dyaw_ = wrapToPi(pending_dyaw_ + (now_pose.yaw - last_odom_.yaw));
     last_odom_ = now_pose;
+  }
+
+  static double yawFromQuat(const geometry_msgs::msg::Quaternion & q)
+  {
+    return std::atan2(2.0 * (q.w * q.z + q.x * q.y),
+                      1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+  }
+
+  /// 收到新的初始位姿：重新初始化粒子滤波器
+  void onInitialPose(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
+  {
+    const auto & p = msg->pose.pose.position;
+    const double yaw = yawFromQuat(msg->pose.pose.orientation);
+
+    // 协方差 → sigma。RViz 拖的方向越长，协方差越大，粒子撒得越开。
+    // 开根号是因为协方差是方差（sigma^2）。下限 1e-4 防止 0 导致粒子全重合。
+    const double sigma_xy = std::sqrt(std::max(msg->pose.covariance[0], 1e-4));
+    const double sigma_yaw = std::sqrt(std::max(msg->pose.covariance[35], 1e-4));
+
+    pf_->initialize(p.x, p.y, yaw, sigma_xy, sigma_yaw);
+
+    // ★ 清掉还没消费的 odom 增量，否则重定位后第一帧会把旧位移加回去
+    pending_dx_ = pending_dy_ = pending_dyaw_ = 0.0;
+
+    RCLCPP_INFO(get_logger(),
+      "收到新的初始位姿 (%.2f, %.2f, %.3f)，sigma=(%.2f, %.2f)，粒子已重新撒开",
+      p.x, p.y, yaw, sigma_xy, sigma_yaw);
   }
 
   void onScan(const sensor_msgs::msg::LaserScan::SharedPtr msg)
@@ -270,6 +304,8 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
+    initial_pose_sub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 };
 
