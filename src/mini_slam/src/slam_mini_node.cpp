@@ -51,6 +51,22 @@ public:
     loop_confirm_score_ = declare_parameter<double>("loop_confirm_score", 0.60);
     optimize_iterations_ = declare_parameter<int>("optimize_iterations", 50);
 
+    // ---------- 回环的位姿一致性检查 ----------
+    //   扫描匹配确认（得分阈值）只能说明"这一帧在这张地图上贴得上"，
+    //   但相似走廊里两个不同的地方也能贴得上（perceptual aliasing）。
+    //   这里再加一道：这次回环要"修正多少"？
+    //     · 修正量太大（> loop_max_correction）→ 要么匹配错了，
+    //       要么漂移已大到无法可靠闭合 → 拒绝
+    //     · 修正量太小（< loop_min_correction）→ 值得修，但不必重建地图
+    //       （避免每帧都全量重算）
+    //
+    //   注意：这不是教科书式 RANSAC（那需要特征点对应 + 内点计数）。
+    //   我们只有"相关性得分 + 位姿"两个信息，所以只能做合理区间筛选。
+    //   它能挡住"匹配到了完全不同的地方"这种离谱误判，
+    //   但挡不住"几何上自洽的误判"（那就是 RANSAC 才能解决的）。
+    loop_max_correction_ = declare_parameter<double>("loop_max_correction", 1.0);
+    loop_min_correction_ = declare_parameter<double>("loop_min_correction", 0.05);
+
     // ---------- 回环后重建地图 ----------
     //   方案 A 只修轨迹、不重建地图 → 墙上仍重影。
     //   这里每帧记下「属于哪个关键帧 + 相对该关键帧的位姿 + 激光」，
@@ -377,18 +393,35 @@ private:
 
     if (best_id < 0) {return;}
 
-    // ★ 回环边的观测 = 【扫描匹配算出来的位姿】（独立于当前位姿估计），
-    //   不是从两个节点位姿反算，否则又变成"自洽"、误差恒 0。
+    // ---------- 位姿一致性检查 ----------
+    //   这次回环要"修正多少" = 匹配结果 vs 图当前认为的位置，差多少
+    const Pose2D matched{best.x, best.y, best.yaw};
+    const double correction = std::hypot(
+      matched.x - graph_.pose(cur).x, matched.y - graph_.pose(cur).y);
+
+    if (correction > loop_max_correction_) {
+      RCLCPP_WARN(get_logger(),
+                  "回环 #%d -> #%d 被拒绝：需要修正 %.3f m，超过上限 %.2f m",
+                  best_id, cur, correction, loop_max_correction_);
+      return;
+    }
+    if (correction < loop_min_correction_) {
+      RCLCPP_INFO(get_logger(),
+                  "回环 #%d -> #%d 确认，但只需修正 %.3f m < %.2f m，跳过优化和重建",
+                  best_id, cur, correction, loop_min_correction_);
+      return;
+    }
+
+    // 通过一致性检查 → 加边
     {
-      const Pose2D matched{best.x, best.y, best.yaw};
       double lx = 0.0, ly = 0.0, lyaw = 0.0;
       relativePoseOut(graph_.pose(best_id), matched, lx, ly, lyaw);
 
       graph_.addEdge(best_id, cur, lx, ly, lyaw, 2.0, 2.0, true);
       ++loop_count_;
       RCLCPP_INFO(get_logger(),
-                  "★ 回环闭合 #%d -> #%d，得分 %.3f，匹配位姿 (%.2f, %.2f, %.2f)（第 %d 次）",
-                  best_id, cur, best_score, best.x, best.y, best.yaw, loop_count_);
+                  "★ 回环闭合 #%d -> #%d，得分 %.3f，修正 %.3f m，匹配位姿 (%.2f, %.2f, %.2f)（第 %d 次）",
+                  best_id, cur, best_score, correction, best.x, best.y, best.yaw, loop_count_);
     }
 
     if (graph_.edgeCount() == 0) {return;}
@@ -526,6 +559,8 @@ private:
   int loop_min_gap_{10};
   double loop_confirm_score_{0.60};
   int optimize_iterations_{50};
+  double loop_max_correction_{1.0};
+  double loop_min_correction_{0.05};
   /// 一帧的存档：属于哪个关键帧、相对该关键帧的位姿、以及激光数据。
   ///   存「相对位姿」而不是绝对位姿，是为了回环优化后能跟着关键帧一起移动。
   struct FrameRecord
