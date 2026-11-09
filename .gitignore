@@ -33,3 +33,6 @@ robot_localization_debug.txt
 # 编译数据库（由 tools/gen_compile_commands.sh 生成，切勿入库）
 compile_commands.json
 src/compile_commands.json
+
+# 本地笔记，不纳入版本控制
+docs/features/12-mini-slam.md
