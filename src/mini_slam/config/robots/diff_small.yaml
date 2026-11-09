@@ -18,3 +18,11 @@ slam_mini:
     resolution: 0.05
     search_xy: 0.10
     search_yaw: 0.10
+
+    # 位姿图：场地小 → 关键帧密一点、回环半径小一点
+    #   激光噪声小（sigma_hit 0.05）→ 回环可以判得严一些
+    keyframe_dist: 0.25
+    keyframe_angle: 0.12
+    loop_radius: 1.5
+    loop_min_gap: 8
+    loop_confirm_score: 0.65

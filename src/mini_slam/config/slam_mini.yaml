@@ -20,3 +20,13 @@ slam_mini:
     search_yaw: 0.15
     search_steps: 7
     min_score: 0.35
+
+    # 位姿图（后端：关键帧 + 回环 + 优化）
+    #   前端（扫描匹配）负责"每帧准"，后端负责"全局一致"。
+    use_pose_graph: true
+    keyframe_dist: 0.30        # 每移动多少米记一个关键帧
+    keyframe_angle: 0.15       # 或每转过多少弧度（原地转时靠它）
+    loop_radius: 2.0           # 回环搜索半径（米）
+    loop_min_gap: 10           # 至少隔多少帧才算回环候选
+    loop_confirm_score: 0.60   # 回环确认的匹配得分阈值（最关键）
+    optimize_iterations: 50    # 每次优化的松弛轮数

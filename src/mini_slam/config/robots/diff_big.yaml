@@ -18,3 +18,11 @@ slam_mini:
     resolution: 0.10
     search_xy: 0.30
     search_yaw: 0.25
+
+    # 位姿图：场地大 → 关键帧稀一点、回环半径放大
+    #   激光噪声大（sigma_hit 0.20）→ 回环得分普遍偏低，阈值要放宽
+    keyframe_dist: 0.50
+    keyframe_angle: 0.20
+    loop_radius: 4.0
+    loop_min_gap: 15
+    loop_confirm_score: 0.55
