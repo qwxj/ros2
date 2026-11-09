@@ -51,6 +51,14 @@ public:
     loop_confirm_score_ = declare_parameter<double>("loop_confirm_score", 0.60);
     optimize_iterations_ = declare_parameter<int>("optimize_iterations", 50);
 
+    // ---------- 回环后重建地图 ----------
+    //   方案 A 只修轨迹、不重建地图 → 墙上仍重影。
+    //   这里每帧记下「属于哪个关键帧 + 相对该关键帧的位姿 + 激光」，
+    //   优化后按 (优化后的关键帧位姿 ⊕ 相对位姿) 重算每帧位置，
+    //   然后清空地图、把所有光线重放一遍。
+    use_map_rebuild_ = declare_parameter<bool>("use_map_rebuild", true);
+    map_rebuild_max_frames_ = declare_parameter<int>("map_rebuild_max_frames", 3000);
+
     const int n = std::max(1, static_cast<int>(std::lround(map_size_m_ / resolution_)));
     map_ = std::make_unique<OccupancyGrid>(
       resolution_, -map_size_m_ * 0.5, -map_size_m_ * 0.5, n, n);
@@ -198,13 +206,94 @@ private:
 
     raycastIntoMap(msg);
 
+    // 存档这一帧，供回环后重建地图用
+    if (use_map_rebuild_ && last_keyframe_id_ >= 0) {
+      captureFrame(msg, inc, ranges);
+    }
+
     if (publish_tf_) {publishTf(msg->header.stamp);}
     if (t - last_publish_ >= publish_period_) {publishMap(t);}
   }
 
+  /// a ⊕ b：把 b 从 a 的坐标系变换到世界系
+  static Pose2D compose(const Pose2D & a, const Pose2D & b)
+  {
+    const double c = std::cos(a.yaw);
+    const double s = std::sin(a.yaw);
+    Pose2D r;
+    r.x = a.x + c * b.x - s * b.y;
+    r.y = a.y + s * b.x + c * b.y;
+    r.yaw = wrapToPi(a.yaw + b.yaw);
+    return r;
+  }
+
+  /// 存档当前帧（相对当前关键帧的位姿 + 激光）
+  void captureFrame(const sensor_msgs::msg::LaserScan::SharedPtr msg,
+                    double angle_inc,
+                    const std::vector<float> & ranges)
+  {
+    // 帧数上限：超了就隔一帧丢一帧（保留覆盖，限制内存）
+    if (static_cast<int>(frame_records_.size()) >= map_rebuild_max_frames_) {
+      std::vector<FrameRecord> kept;
+      kept.reserve(frame_records_.size() / 2 + 1);
+      for (size_t i = 0; i < frame_records_.size(); i += 2) {
+        kept.push_back(std::move(frame_records_[i]));
+      }
+      frame_records_.swap(kept);
+    }
+
+    FrameRecord f;
+    f.kf_id = last_keyframe_id_;
+    double rx = 0.0, ry = 0.0, ryaw = 0.0;
+    relativePoseOut(graph_.pose(last_keyframe_id_), pose_, rx, ry, ryaw);
+    f.rel.x = rx; f.rel.y = ry; f.rel.yaw = ryaw;
+    f.ranges = ranges;
+    f.angle_min = msg->angle_min;
+    f.angle_increment = angle_inc;
+    f.range_max = msg->range_max;
+    frame_records_.push_back(std::move(f));
+  }
+
+  /// 用优化后的关键帧位姿重算每帧位置，清空地图后重放所有光线
+  void rebuildFromFrames()
+  {
+    if (frame_records_.empty()) {return;}
+
+    // 重建一张同样尺寸的空地图
+    const int n = std::max(1, static_cast<int>(std::lround(map_size_m_ / resolution_)));
+    map_ = std::make_unique<OccupancyGrid>(
+      resolution_, -map_size_m_ * 0.5, -map_size_m_ * 0.5, n, n);
+
+    for (const auto & f : frame_records_) {
+      if (f.kf_id < 0 || f.kf_id >= graph_.size()) {continue;}
+      // ★ 关键：帧位姿 = 优化后的关键帧位姿 ⊕ 捕获时的相对位姿
+      const Pose2D p = compose(graph_.pose(f.kf_id), f.rel);
+
+      for (size_t i = 0; i < f.ranges.size(); ++i) {
+        const double r = f.ranges[i];
+        if (!std::isfinite(r) || r < 0.05 || r >= f.range_max) {continue;}
+        const double a = p.yaw + f.angle_min + static_cast<double>(i) * f.angle_increment;
+        map_->raycast(p.x, p.y,
+                      p.x + r * std::cos(a), p.y + r * std::sin(a));
+      }
+    }
+    ++map_rebuild_count_;
+
+    // 统计重建后的占据格数，方便对比"重影有没有减少"
+    int occupied = 0;
+    for (int gy = 0; gy < map_->height(); ++gy) {
+      for (int gx = 0; gx < map_->width(); ++gx) {
+        if (map_->probability(gx, gy) > 50) {++occupied;}
+      }
+    }
+    RCLCPP_INFO(get_logger(),
+                "地图已用 %zu 帧重建（第 %d 次），占据格 %d 个",
+                frame_records_.size(), map_rebuild_count_, occupied);
+  }
+
   /// a -> b 的相对位姿（在 a 的坐标系下），也就是 inv(a) * b
-  static void relativePose(const Pose2D & a, const Pose2D & b,
-                           double & dx, double & dy, double & dyaw)
+  static void relativePoseOut(const Pose2D & a, const Pose2D & b,
+                              double & dx, double & dy, double & dyaw)
   {
     const double c = std::cos(a.yaw);
     const double s = std::sin(a.yaw);
@@ -249,7 +338,7 @@ private:
     kf_odom_.push_back(odom_pose_);        // 仅留作调试，不参与建边
 
     double dx = 0.0, dy = 0.0, dyaw = 0.0;
-    relativePose(prev, pose_, dx, dy, dyaw);
+    relativePoseOut(prev, pose_, dx, dy, dyaw);
     graph_.addEdge(last_keyframe_id_, cur, dx, dy, dyaw, 1.0, 1.0, false);
 
     RCLCPP_INFO(get_logger(), "位姿图：加关键帧 #%d (%.2f, %.2f, %.2f)，%d 个节点",
@@ -293,7 +382,7 @@ private:
     {
       const Pose2D matched{best.x, best.y, best.yaw};
       double lx = 0.0, ly = 0.0, lyaw = 0.0;
-      relativePose(graph_.pose(best_id), matched, lx, ly, lyaw);
+      relativePoseOut(graph_.pose(best_id), matched, lx, ly, lyaw);
 
       graph_.addEdge(best_id, cur, lx, ly, lyaw, 2.0, 2.0, true);
       ++loop_count_;
@@ -318,6 +407,11 @@ private:
     RCLCPP_INFO(get_logger(),
                 "位姿图优化：总误差 %.4f -> %.4f，当前节点挪了 %.3f m",
                 err_before, err_after, shift);
+
+    // ★ 方案 B：用优化后的位姿把所有帧的地图重算一遍
+    if (use_map_rebuild_) {
+      rebuildFromFrames();
+    }
     (void)prev_kf;
   }
 
@@ -432,6 +526,22 @@ private:
   int loop_min_gap_{10};
   double loop_confirm_score_{0.60};
   int optimize_iterations_{50};
+  /// 一帧的存档：属于哪个关键帧、相对该关键帧的位姿、以及激光数据。
+  ///   存「相对位姿」而不是绝对位姿，是为了回环优化后能跟着关键帧一起移动。
+  struct FrameRecord
+  {
+    int kf_id{-1};
+    Pose2D rel;                              // 在关键帧坐标系下的位姿
+    std::vector<float> ranges;
+    double angle_min{0.0};
+    double angle_increment{0.0};
+    double range_max{0.0};
+  };
+  std::vector<FrameRecord> frame_records_;
+  bool use_map_rebuild_{true};
+  int map_rebuild_max_frames_{3000};
+  int map_rebuild_count_{0};
+
   std::vector<Pose2D> kf_odom_;   // 每个关键帧时刻的 odom 位姿（odom 边的观测来源）
   int last_keyframe_id_{-1};
   int loop_count_{0};
