@@ -36,3 +36,4 @@ src/compile_commands.json
 
 # 本地笔记，不纳入版本控制
 docs/features/12-mini-slam.md
+docs/notes/mini-slam-summary.md
