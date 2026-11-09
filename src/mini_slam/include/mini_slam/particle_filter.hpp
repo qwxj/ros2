@@ -51,6 +51,18 @@ public:
   void resample();
 
   double effectiveSampleSize() const;
+
+  /// 粒子云的加权协方差（只取对角项，单位是「方差」不是「标准差」）
+  ///
+  /// 用途：填 /amcl_pose 的 covariance 字段。
+  ///   两级 EKF 用 (H·P·Hᵀ + R) 决定卡尔曼增益，R 就是观测协方差 ——
+  ///   R 小 = 相信这次观测，R 大 = 更相信预测。
+  ///   如果协方差写死，EKF 就永远用同一个权重，退化成固定比例的加权平均。
+  ///
+  /// 注意：调用方要自己加下限（如 1e-4）。粒子全部重合时方差为 0，
+  ///       会让 EKF 认为"这次观测绝对准确"，恰恰是最危险的情况。
+  void poseCovariance(double & var_x, double & var_y, double & var_yaw) const;
+  
   Pose2D estimatedPose() const;
   bool converged(double dist_thresh, double yaw_thresh) const;
 

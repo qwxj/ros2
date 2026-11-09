@@ -279,3 +279,37 @@ TEST(ParticleFilterAdvanced, InjectionRisesWhenKidnapped)
   EXPECT_LT(p_good, 0.3);
   EXPECT_GT(p_bad, 0.5);
 }
+
+
+
+// ============================================================
+// C-5：poseCovariance() —— 收敛后方差应该显著变小
+// ============================================================
+TEST(ParticleFilterAdvanced, PoseCovarianceShrinksAfterConvergence)
+{
+  const OccupancyGrid map = makeRoom();
+  ParticleFilter pf(2000, 424242);
+  pf.initialize(2.0, 2.0, 0.0, 1.0, 0.6);      // 初始很散
+  pf.setMap(map);
+
+  double vx0 = 0.0, vy0 = 0.0, vw0 = 0.0;
+  pf.poseCovariance(vx0, vy0, vw0);
+  std::printf("  初始: var=(%.4f, %.4f, %.4f)\n", vx0, vy0, vw0);
+
+  const auto scan = makeScan(map, 2.0, 2.0, 0.0, 360, kAngleMinAdv, kAngleIncAdv, 4.0);
+  for (int i = 0; i < 15; ++i) {
+    pf.updateWeights(scan, kAngleMinAdv, kAngleIncAdv, 4.0);
+    pf.resample();
+  }
+
+  double vx1 = 0.0, vy1 = 0.0, vw1 = 0.0;
+  pf.poseCovariance(vx1, vy1, vw1);
+  std::printf("  收敛: var=(%.6f, %.6f, %.6f)\n", vx1, vy1, vw1);
+
+  EXPECT_GT(vx0, vx1) << "收敛后 x 方差应该变小";
+  EXPECT_GT(vy0, vy1) << "收敛后 y 方差应该变小";
+  EXPECT_GT(vw0, vw1) << "收敛后 yaw 方差应该变小";
+  EXPECT_GE(vx1, 0.0);
+  EXPECT_GE(vy1, 0.0);
+  EXPECT_GE(vw1, 0.0);
+}

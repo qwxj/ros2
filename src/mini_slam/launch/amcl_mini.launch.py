@@ -6,6 +6,7 @@
     ros2 launch mini_slam amcl_mini.launch.py map:=/home/wxj/mini_map.yaml
     ros2 launch mini_slam amcl_mini.launch.py map:=none       # 用外部的 /map
     ros2 launch mini_slam amcl_mini.launch.py robot:=diff_small
+    ros2 launch mini_slam amcl_mini.launch.py rviz:=false      # 无图形界面
 
 启动内容：
     map 非空时：  map_server + lifecycle_manager（自动 config+activate）+ amcl_mini
@@ -63,6 +64,7 @@ def launch_setup(context, *args, **kwargs):
     robot = LaunchConfiguration('robot').perform(context)
     map_yaml = resolve_map(LaunchConfiguration('map').perform(context))
     use_sim_time = LaunchConfiguration('use_sim_time').perform(context).lower() == 'true'
+    rviz = LaunchConfiguration('rviz').perform(context).lower() == 'true'
 
     # ---------- 参数：通用 + 机型覆盖 ----------
     params = [os.path.join(config_dir, 'amcl_mini.yaml')]
@@ -117,6 +119,15 @@ def launch_setup(context, *args, **kwargs):
         parameters=params,
     ))
 
+    if rviz:
+        actions.append(Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            output='screen',
+            arguments=['-d', os.path.join(config_dir, 'rviz', 'mini_slam.rviz')],
+        ))
+
     return actions
 
 
@@ -130,5 +141,8 @@ def generate_launch_description():
             description='地图：绝对路径 / 包内名字（maps/<name>.yaml）/ none'),
         DeclareLaunchArgument(
             'use_sim_time', default_value='false'),
+        DeclareLaunchArgument(
+            'rviz', default_value='true',
+            description='是否同时打开 RViz（无图形界面时传 false）'),
         OpaqueFunction(function=launch_setup),
     ])

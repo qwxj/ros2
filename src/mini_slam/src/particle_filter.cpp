@@ -304,6 +304,27 @@ double ParticleFilter::effectiveSampleSize() const
   return (s > 0.0) ? 1.0 / s : 0.0;
 }
 
+
+
+void ParticleFilter::poseCovariance(double & var_x, double & var_y, double & var_yaw) const
+{
+  var_x = var_y = var_yaw = 0.0;
+  if (particles_.empty()) {return;}
+
+  const Pose2D mean = estimatedPose();
+  for (const auto & p : particles_) {
+    const double dx = p.pose.x - mean.x;
+    const double dy = p.pose.y - mean.y;
+    // 朝向差要归一化到 [-pi, pi]，否则跨 ±pi 的粒子会被算成巨大方差
+    const double dyaw = wrapToPi(p.pose.yaw - mean.yaw);
+
+    var_x += p.weight * dx * dx;
+    var_y += p.weight * dy * dy;
+    var_yaw += p.weight * dyaw * dyaw;
+  }
+}
+
+
 Pose2D ParticleFilter::estimatedPose() const
 {
   Pose2D out;

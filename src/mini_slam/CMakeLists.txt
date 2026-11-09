@@ -15,6 +15,7 @@ find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(std_srvs REQUIRED)
 
 # ============================================================
 # 核心库：纯 C++，零 ROS 依赖 → 可被 gtest 秒测
@@ -38,7 +39,7 @@ target_compile_options(mini_slam_core PRIVATE -Wall -Wextra)
 # ============================================================
 # ROS 节点（把算法接成能跑的东西）
 # ============================================================
-set(MINI_SLAM_DEPS rclcpp nav_msgs sensor_msgs geometry_msgs tf2_ros)
+set(MINI_SLAM_DEPS rclcpp nav_msgs sensor_msgs geometry_msgs tf2_ros std_srvs)
 
 add_executable(ekf_node src/ekf_node.cpp)
 target_link_libraries(ekf_node mini_slam_core)

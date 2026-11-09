@@ -238,9 +238,18 @@ private:
     out.pose.pose.position.x = est.x;
     out.pose.pose.position.y = est.y;
     out.pose.pose.orientation = quatFromYaw(est.yaw);
-    out.pose.covariance[0] = 0.05;
-    out.pose.covariance[7] = 0.05;
-    out.pose.covariance[35] = 0.02;
+    
+    // ★ 用粒子云的真实方差，而不是写死的值。
+    //   两级 EKF 靠这个决定"该多信任 AMCL" —— 粒子散开时 R 大，
+    //   EKF 就会更多依赖里程计预测；粒子收敛时 R 小，更信观测。
+    // 下限 1e-4：粒子全部重合（方差 0）时如果原样发出去，
+    //   EKF 会认为"这次观测绝对准确"，恰恰是最危险的情况。
+    double var_x = 0.0, var_y = 0.0, var_yaw = 0.0;
+    pf_->poseCovariance(var_x, var_y, var_yaw);
+    out.pose.covariance[0]  = std::max(var_x, 1e-4);
+    out.pose.covariance[7]  = std::max(var_y, 1e-4);
+    out.pose.covariance[35] = std::max(var_yaw, 1e-4);
+
     pose_pub_->publish(out);
 
     if (tf_broadcaster_ && has_odom_) {
