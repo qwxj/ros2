@@ -123,30 +123,96 @@ def main():
         stop_burst()
 
     def hold_closed(dist, turn, vx, wz, timeout):
-        """闭环：走够 dist 米 / 转够 turn 弧度就停（看 /odom）。"""
+        """闭环：走够 dist 米 / 转够 turn 弧度就停（看 /odom）。
+
+        两段式，解决超调：
+          ① 粗走：当剩余量 <= 提前量(lead) 时立刻发停 —— 抵消"最后一个周期
+             + 停车脉冲"期间仍在运动的那一段。
+          ② 补正：停下后重新测量，误差超过容差就再补一个短脉冲，
+             最多补 5 次。这样最终误差能收敛到 1~2°。
+        """
+        TOL = 0.02          # 转 0.02 rad ≈ 1.1°
+        MIN_PULSE = 0.10    # 最短脉冲时长
+        MAX_PULSE = 0.40
+
+        def measure():
+            if dist != 0.0:
+                return math.hypot(state['x'] - x0, state['y'] - y0)
+            return norm(state['yaw'] - yaw0)
+
+        def pulse(dur, going_forward):
+            m2 = Twist()
+            if going_forward:
+                m2.linear.x = vx
+            else:
+                m2.angular.z = wz
+            t = time.time()
+            while time.time() - t < dur:
+                pub.publish(m2)
+                rclpy.spin_once(node, timeout_sec=0.0)
+                time.sleep(0.03)
+            st = Twist()
+            for _ in range(3):          # 立刻停车，只发 3 次
+                pub.publish(st)
+                time.sleep(0.03)
+
         pump(0.3)
         x0, y0, yaw0 = state['x'], state['y'], state['yaw']
+        goal = abs(dist) if dist != 0.0 else abs(turn)
+        rate = abs(vx) if dist != 0.0 else abs(wz)
+
+        # ---- ① 粗走，带提前量 ----
+        lead = rate * 0.55            # 一个周期(0.05) + 停车(0.15) + 余量
         m = Twist()
-        if abs(dist) > 1e-6:
+        if dist != 0.0:
             m.linear.x = vx
-        if abs(turn) > 1e-6:
+        if turn != 0.0:
             m.angular.z = wz
         t0 = time.time()
         while time.time() - t0 < timeout:
-            if dist != 0.0:
-                done = math.hypot(state['x'] - x0, state['y'] - y0) >= abs(dist)
-            else:
-                done = abs(norm(state['yaw'] - yaw0)) >= abs(turn)
-            if done:
+            remaining = goal - abs(measure())
+            if remaining <= lead:
                 break
             pub.publish(m)
             rclpy.spin_once(node, timeout_sec=0.0)
-            time.sleep(0.05)
-        stop_burst()
-        if time.time() - t0 >= timeout:
+            time.sleep(0.03)
+        st = Twist()
+        for _ in range(3):
+            pub.publish(st)
+            time.sleep(0.03)
+        pump(0.25)
+
+        # ---- ② 补正，最多 5 次 ----
+        for _ in range(5):
+            done_now = abs(measure())
+            err = goal - done_now
+            if abs(err) <= TOL:
+                break
+            dur = min(max(abs(err) / rate, MIN_PULSE), MAX_PULSE)
+            forward = (dist != 0.0)
+            signed = (1 if (dist != 0.0 and dist > 0) or (turn != 0.0 and turn > 0) else -1)
+            if forward:
+                pulse(dur, True)
+            else:
+                # 用带符号的角速度脉冲：方向要与 err 一致
+                m2 = Twist()
+                m2.angular.z = (abs(wz) if err > 0 else -abs(wz))
+                t = time.time()
+                while time.time() - t < dur:
+                    pub.publish(m2)
+                    rclpy.spin_once(node, timeout_sec=0.0)
+                    time.sleep(0.03)
+                s2 = Twist()
+                for _ in range(3):
+                    pub.publish(s2)
+                    time.sleep(0.03)
+            pump(0.25)
+
+        final_err = abs(goal - abs(measure()))
+        if final_err > 0.05:
             node.get_logger().warn(
-                '闭环超时（%.1f s）：dist=%.2f turn=%.2f，可能是被 collision_monitor 挡住了'
-                % (timeout, dist, turn))
+                '闭环收敛不足：目标 %.2f，实到 %.2f，误差 %.2f'
+                % (goal, abs(measure()), final_err))
 
     total = args.laps * (sum(legs) / args.speed + len(legs) * t_turn)
     node.get_logger().info(
