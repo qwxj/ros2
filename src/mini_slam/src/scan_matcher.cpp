@@ -33,13 +33,31 @@ double ScanMatcher::rawScore(double wx, double wy, double yaw,
   double sum = 0.0;
   int used = 0;
 
+  // ★ 传进来的 (wx, wy, yaw) 是 base_link 位姿，但每束激光是从 laser_link 发出的。
+  //   先变换到 laser_link，否则整张图会沿车头方向偏 laser_x_ 米；
+  //   连续转弯时偏差方向跟着转，墙就被抹成放射状条纹。
+  double lx = wx;
+  double ly = wy;
+  double lyaw = yaw;
+  if (laser_x_ != 0.0 || laser_y_ != 0.0 || laser_yaw_ != 0.0) {
+    const double c = std::cos(yaw);
+    const double sy = std::sin(yaw);
+    lx = wx + c * laser_x_ - sy * laser_y_;
+    ly = wy + sy * laser_x_ + c * laser_y_;
+    lyaw = yaw + laser_yaw_;
+  }
+
   for (size_t i = 0; i < ranges.size(); ++i) {
     const double r = ranges[i];
     if (!std::isfinite(r) || r < 0.05 || r >= range_max) {continue;}
 
-    const double a = yaw + angle_min + static_cast<double>(i) * angle_increment;
-    const double ex = wx + r * std::cos(a);
-    const double ey = wy + r * std::sin(a);
+    const double a = lyaw + angle_min + static_cast<double>(i) * angle_increment;
+
+
+    const double ex = lx + r * std::cos(a);
+
+
+    const double ey = ly + r * std::sin(a);
 
     const int gx = static_cast<int>(std::floor((ex - map_origin_x_) / map_res_));
     const int gy = static_cast<int>(std::floor((ey - map_origin_y_) / map_res_));

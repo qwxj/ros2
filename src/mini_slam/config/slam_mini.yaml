@@ -15,6 +15,13 @@ slam_mini:
     publish_period: 2.0
     map_path: /home/wxj/mini_map
 
+    # 激光安装外参（laser_link 相对 base_link）
+    #   实测：车停在原点朝 -x 打，scan 读到 1.90 m，而障碍面在 x=-1.8，
+    #   差值 0.10 m 就是激光的前向偏移。换底盘/换雷达位置要重新量。
+    laser_x: 0.10
+    laser_y: 0.0
+    laser_yaw: 0.0
+
     # 扫描匹配（由粗到细相关性搜索）
     search_xy: 0.15
     search_yaw: 0.15
