@@ -8,11 +8,17 @@
     单进程连续 publish 就没有这个空档。
 
 用法：
-    python3 tools/drive_square.py                       # 默认：1.5 m 方形
+    python3 tools/drive_square.py                       # 默认：1.5 m 方形（左转）
     python3 tools/drive_square.py --side 1.0            # 走小一点
     python3 tools/drive_square.py --speed 0.1           # 走慢一点
     python3 tools/drive_square.py --turn-dir -1         # 顺时针
     python3 tools/drive_square.py --laps 2              # 走两圈
+
+    # 推荐：走仿真场景里的无障碍矩形（避开中间那四块障碍物）
+    python3 tools/drive_square.py --legs 2.5,2.0,1.45,2.0 --turn-deg -90
+
+注意：默认的 1.5 m 方形会撞上场景里的障碍物（C 段 x 1.2~2.85 / y 0.5~1.2），
+      在 my_robot_description 的默认世界里有风险，请用上面的 --legs 版本。
 
 前置条件：
     1. 底盘已启动：  ros2 launch my_robot_control robot.launch.py
@@ -27,7 +33,12 @@ import time
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--side', type=float, default=1.5,
-                    help='方形边长（米），默认 1.5')
+                    help='方形边长（米），默认 1.5；指定 --legs 时忽略')
+    ap.add_argument('--legs', default=None,
+                    help='任意段长，逗号分隔，例如 2.5,2.0,1.45,2.0。'
+                         '每段结束后按 --turn-deg 转向。指定后忽略 --side')
+    ap.add_argument('--turn-deg', type=float, default=90.0,
+                    help='每段后转的角度，负数=右转（顺时针），默认 90（左转）')
     ap.add_argument('--speed', type=float, default=0.15,
                     help='直行速度（m/s），默认 0.15')
     ap.add_argument('--yaw-rate', type=float, default=0.40,
@@ -56,8 +67,12 @@ def main():
     pub = node.create_publisher(Twist, args.topic, 10)
     time.sleep(args.settle)          # 等 DDS 发现
 
-    t_go = args.side / args.speed
-    t_turn = (math.pi / 2.0) / args.yaw_rate
+    if args.legs:
+        legs = [float(v) for v in args.legs.split(',') if v.strip()]
+    else:
+        legs = [args.side] * 4
+    turn_rad = math.radians(args.turn_deg)
+    t_turn = abs(turn_rad) / args.yaw_rate
 
     def hold(vx, wz, dur):
         """持续发布同一速度指令 dur 秒，然后停稳。"""
@@ -73,18 +88,20 @@ def main():
             pub.publish(stop)
             time.sleep(0.05)
 
-    total = args.laps * 4 * (t_go + t_turn)
+    total = args.laps * (sum(legs) / args.speed + len(legs) * t_turn)
     node.get_logger().info(
-        '方形轨迹：边长 %.2f m，速度 %.2f m/s，%d 圈，预计 %.1f 秒'
-        % (args.side, args.speed, args.laps, total))
+        '路径：%s 段 %s，每段后转 %.0f°，速度 %.2f m/s，%d 圈，预计 %.1f 秒'
+        % (len(legs), legs, args.turn_deg, args.speed, args.laps, total))
 
     for lap in range(args.laps):
-        for i in range(4):
+        for i, L in enumerate(legs):
             node.get_logger().info(
-                '%d-%d 前进 %.2f m' % (lap + 1, i + 1, args.side))
-            hold(args.speed, 0.0, t_go)
-            node.get_logger().info('%d-%d 转 90°' % (lap + 1, i + 1))
-            hold(0.0, args.turn_dir * args.yaw_rate, t_turn)
+                '%d-%d 前进 %.2f m' % (lap + 1, i + 1, L))
+            hold(args.speed, 0.0, L / args.speed)
+            node.get_logger().info(
+                '%d-%d 转 %.0f°' % (lap + 1, i + 1, args.turn_deg))
+            hold(0.0, args.turn_dir * args.yaw_rate * (1 if args.turn_deg >= 0 else -1),
+                 t_turn)
 
     node.get_logger().info('回到起点，结束')
     hold(0.0, 0.0, 1.0)
