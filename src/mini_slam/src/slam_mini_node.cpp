@@ -29,6 +29,16 @@ public:
     map_frame_ = declare_parameter<std::string>("map_frame", "map");
     odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
     base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
+
+    // ---------- 激光安装外参（laser_link 相对 base_link）----------
+    //   仿真里激光装在车头前方 0.10 m：实测在原点朝 -x 打，读到 1.90 m，
+    //   而障碍面在 x=-1.8（离车体中心 1.8 m），差值就是激光的前向偏移。
+    //   不处理这个偏移，建图时整张图会随车头朝向被抹开 0.1 m，
+    //   转几次弯之后墙就变成放射状条纹。
+    laser_x_ = declare_parameter<double>("laser_x", 0.10);
+    laser_y_ = declare_parameter<double>("laser_y", 0.0);
+    laser_yaw_ = declare_parameter<double>("laser_yaw", 0.0);
+    sm_.setLaserOffset(laser_x_, laser_y_, laser_yaw_);
     publish_tf_ = declare_parameter<bool>("publish_tf", true);
 
     resolution_ = declare_parameter<double>("resolution", 0.05);
@@ -231,6 +241,19 @@ private:
     if (t - last_publish_ >= publish_period_) {publishMap(t);}
   }
 
+  /// base_link 位姿 → laser_link 位姿（应用激光安装外参）
+  Pose2D laserPose(const Pose2D & base) const
+  {
+    if (laser_x_ == 0.0 && laser_y_ == 0.0 && laser_yaw_ == 0.0) {return base;}
+    const double c = std::cos(base.yaw);
+    const double s = std::sin(base.yaw);
+    Pose2D r;
+    r.x = base.x + c * laser_x_ - s * laser_y_;
+    r.y = base.y + s * laser_x_ + c * laser_y_;
+    r.yaw = base.yaw + laser_yaw_;
+    return r;
+  }
+
   /// a ⊕ b：把 b 从 a 的坐标系变换到世界系
   static Pose2D compose(const Pose2D & a, const Pose2D & b)
   {
@@ -283,7 +306,7 @@ private:
     for (const auto & f : frame_records_) {
       if (f.kf_id < 0 || f.kf_id >= graph_.size()) {continue;}
       // ★ 关键：帧位姿 = 优化后的关键帧位姿 ⊕ 捕获时的相对位姿
-      const Pose2D p = compose(graph_.pose(f.kf_id), f.rel);
+      const Pose2D p = laserPose(compose(graph_.pose(f.kf_id), f.rel));
 
       for (size_t i = 0; i < f.ranges.size(); ++i) {
         const double r = f.ranges[i];
@@ -450,13 +473,16 @@ private:
 
   void raycastIntoMap(const sensor_msgs::msg::LaserScan::SharedPtr msg)
   {
+    // 射线从 laser_link 发出，不是从 base_link —— 必须先做外参变换
+    const Pose2D lp = laserPose(pose_);
+
     for (size_t i = 0; i < msg->ranges.size(); ++i) {
       const double r = msg->ranges[i];
       if (!std::isfinite(r) || r < msg->range_min || r >= msg->range_max) {continue;}
-      const double a = pose_.yaw + msg->angle_min +
+      const double a = lp.yaw + msg->angle_min +
         static_cast<double>(i) * msg->angle_increment;
-      map_->raycast(pose_.x, pose_.y,
-                    pose_.x + r * std::cos(a), pose_.y + r * std::sin(a));
+      map_->raycast(lp.x, lp.y,
+                    lp.x + r * std::cos(a), lp.y + r * std::sin(a));
     }
   }
 
@@ -541,6 +567,11 @@ private:
   }
 
   std::string scan_topic_, odom_topic_, map_frame_, odom_frame_, base_frame_, map_path_;
+
+  // 激光安装外参（laser_link 相对 base_link）
+  double laser_x_{0.10};
+  double laser_y_{0.0};
+  double laser_yaw_{0.0};
   bool publish_tf_{true};
   double resolution_{0.05}, map_size_m_{12.0};
   double search_xy_{0.15}, search_yaw_{0.15};

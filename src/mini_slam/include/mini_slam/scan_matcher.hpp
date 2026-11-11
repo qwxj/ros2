@@ -50,6 +50,18 @@ public:
                         int steps = 7,
                         double sigma = 0.10) const;
 
+  /// 设置激光安装外参（laser_link 相对 base_link）：
+  ///   x/y 是激光在车体坐标系下的位置，yaw 是激光相对车头的旋转。
+  ///   scoreAt / match 传进来的位姿是【base_link】的，内部会先变换到 laser_link
+  ///   再算每一束的端点。不设置时按 0 处理（等于假设激光就在车体中心）。
+  ///
+  ///   为什么需要它：仿真里激光装在车头前方 0.10 m，若忽略这个偏移，
+  ///   建图时整张图会随车头朝向被抹开约 0.1 m，转几次弯后墙就变成放射状条纹。
+  void setLaserOffset(double x, double y, double yaw)
+  {
+    laser_x_ = x; laser_y_ = y; laser_yaw_ = yaw;
+  }
+
   bool hasMap() const { return has_map_; }
   int mapWidth() const { return map_w_; }
   int mapHeight() const { return map_h_; }
@@ -68,6 +80,11 @@ private:
   double map_origin_x_{0.0};
   double map_origin_y_{0.0};
   bool has_map_{false};
+
+  // 激光安装外参（laser_link 相对 base_link）
+  double laser_x_{0.0};
+  double laser_y_{0.0};
+  double laser_yaw_{0.0};
 };
 
 }  // namespace mini_slam
