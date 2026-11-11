@@ -125,54 +125,54 @@ def main():
     def hold_closed(dist, turn, vx, wz, timeout):
         """闭环：走够 dist 米 / 转够 turn 弧度就停（看 /odom）。
 
-        两段式，解决超调：
-          ① 粗走：当剩余量 <= 提前量(lead) 时立刻发停 —— 抵消"最后一个周期
-             + 停车脉冲"期间仍在运动的那一段。
-          ② 补正：停下后重新测量，误差超过容差就再补一个短脉冲，
-             最多补 5 次。这样最终误差能收敛到 1~2°。
+        ★ 角度必须全程带符号。
+          之前的写法用 abs() 把符号丢掉了，机器人转过头之后
+          补正脉冲仍然发同方向的角速度，结果越补越多 ——
+          实测指令 90°，实际每次都到 130~135°。
         """
-        TOL = 0.02          # 转 0.02 rad ≈ 1.1°
-        MIN_PULSE = 0.10    # 最短脉冲时长
-        MAX_PULSE = 0.40
+        TOL = 0.03            # 3° 左右
+        MAX_PULSE = 0.50
+        MIN_PULSE = 0.08
 
-        def measure():
-            if dist != 0.0:
-                return math.hypot(state['x'] - x0, state['y'] - y0)
-            return norm(state['yaw'] - yaw0)
+        pump(0.3)
+        x0, y0, yaw0 = state['x'], state['y'], state['yaw']
+        is_turn = (turn != 0.0)
+        target = turn if is_turn else abs(dist)
 
-        def pulse(dur, going_forward):
+        def err_now():
+            """带符号的剩余量：>0 还没到，<0 已经超了。"""
+            if is_turn:
+                return target - norm(state['yaw'] - yaw0)
+            return target - math.hypot(state['x'] - x0, state['y'] - y0)
+
+        rate = abs(wz) if is_turn else abs(vx)
+        lead = rate * 0.50        # 提前量：抵消停车那一段的惯性
+
+        def send(v, w, dur):
             m2 = Twist()
-            if going_forward:
-                m2.linear.x = vx
-            else:
-                m2.angular.z = wz
+            m2.linear.x = v
+            m2.angular.z = w
             t = time.time()
             while time.time() - t < dur:
                 pub.publish(m2)
                 rclpy.spin_once(node, timeout_sec=0.0)
                 time.sleep(0.03)
             st = Twist()
-            for _ in range(3):          # 立刻停车，只发 3 次
+            for _ in range(3):
                 pub.publish(st)
                 time.sleep(0.03)
+            pump(0.25)
 
-        pump(0.3)
-        x0, y0, yaw0 = state['x'], state['y'], state['yaw']
-        goal = abs(dist) if dist != 0.0 else abs(turn)
-        rate = abs(vx) if dist != 0.0 else abs(wz)
-
-        # ---- ① 粗走，带提前量 ----
-        lead = rate * 0.55            # 一个周期(0.05) + 停车(0.15) + 余量
-        m = Twist()
-        if dist != 0.0:
-            m.linear.x = vx
-        if turn != 0.0:
-            m.angular.z = wz
+        # ---- ① 粗走 ----
         t0 = time.time()
         while time.time() - t0 < timeout:
-            remaining = goal - abs(measure())
-            if remaining <= lead:
+            if err_now() <= lead:
                 break
+            m = Twist()
+            if is_turn:
+                m.angular.z = wz
+            else:
+                m.linear.x = vx
             pub.publish(m)
             rclpy.spin_once(node, timeout_sec=0.0)
             time.sleep(0.03)
@@ -182,37 +182,26 @@ def main():
             time.sleep(0.03)
         pump(0.25)
 
-        # ---- ② 补正，最多 5 次 ----
-        for _ in range(5):
-            done_now = abs(measure())
-            err = goal - done_now
-            if abs(err) <= TOL:
+        # ---- ② 补正：方向跟着带符号的误差走 ----
+        for _ in range(6):
+            e = err_now()
+            if abs(e) <= TOL:
                 break
-            dur = min(max(abs(err) / rate, MIN_PULSE), MAX_PULSE)
-            forward = (dist != 0.0)
-            signed = (1 if (dist != 0.0 and dist > 0) or (turn != 0.0 and turn > 0) else -1)
-            if forward:
-                pulse(dur, True)
+            dur = min(max(abs(e) / rate, MIN_PULSE), MAX_PULSE)
+            if is_turn:
+                # 方向 = e 的符号；反方向也能补（这才是修超调的关键）
+                send(0.0, math.copysign(rate, e), dur)
             else:
-                # 用带符号的角速度脉冲：方向要与 err 一致
-                m2 = Twist()
-                m2.angular.z = (abs(wz) if err > 0 else -abs(wz))
-                t = time.time()
-                while time.time() - t < dur:
-                    pub.publish(m2)
-                    rclpy.spin_once(node, timeout_sec=0.0)
-                    time.sleep(0.03)
-                s2 = Twist()
-                for _ in range(3):
-                    pub.publish(s2)
-                    time.sleep(0.03)
-            pump(0.25)
+                if e > 0:
+                    send(vx, 0.0, dur)          # 还差，往前补
+                else:
+                    send(-abs(vx) * 0.5, 0.0, dur)  # 超了，慢慢倒回来
 
-        final_err = abs(goal - abs(measure()))
-        if final_err > 0.05:
+        e_final = err_now()
+        if abs(e_final) > 0.06:
             node.get_logger().warn(
-                '闭环收敛不足：目标 %.2f，实到 %.2f，误差 %.2f'
-                % (goal, abs(measure()), final_err))
+                '闭环未收敛：目标 %.2f，实到 %.2f，剩余 %.2f'
+                % (target, target - e_final, e_final))
 
     total = args.laps * (sum(legs) / args.speed + len(legs) * t_turn)
     node.get_logger().info(
