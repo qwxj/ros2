@@ -173,6 +173,46 @@ tools/                     # bag 指标、指令时间线等分析脚本
 - **安全链**：watchdog 管"没指令"，collision_monitor 管"会撞"，串联顺序不可颠倒。见 `docs/features/07-safety.md`。
 - **零拷贝**：`borrow_loaned_message` + Fast DDS `data_sharing` profile，对比普通发布的端到端延迟。
 
+## 踩过的坑
+
+调试过程中真实遇到、定位过、修掉的问题。每条都写了「现象 → 根因 → 修法」，
+以后再碰到同类现象可以直接对照。
+
+### 路径与安全链
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 规划好的一段路，车走到一半**卡住不动**，SLAM 位姿也定在那儿不变 | 路径离障碍只有 **0.45 m**，车头顶到了障碍。`collision_monitor` 的 `PolygonSlowdown` 在 **0.70 m**、`PolygonStop` 在 0.28 m | **规划路径按 0.70 m 留余量，不是按车身半径**。实测：0.55 m 能过（只是减速），0.45 m 会被卡死，阈值在 0.5 m 附近 |
+| 转头指令 90°，实际只转了 45° | 转弯位置落在 0.7 m 减速区内，速度被砍到 40%，而驱动脚本按**固定时间**开环发指令 | 驱动改成**闭环**：订阅 `/odom`，转够角度就停 |
+| 转头指令 90°，实际转了约 100° | 判定到位后还发了 0.4 s 的指令（最后一个周期 + 停车脉冲），0.4 rad/s × 0.4 s = 9° | 加**提前量**（剩余量 <= rate×0.5 就发停），停车脉冲从 6 次减到 3 次 |
+| 转头越"补正"越偏，90° 一路补到 135° | 闭环里对角度用了 `abs()`，符号丢了。转多之后误差变负，补正分支**仍然发同方向的角速度**，越补越多 | 角度**全程带符号**：`target = turn`（不取 abs），补正方向 = `copysign(rate, err)` |
+| 分段用 `ros2 topic pub` 发指令，车走走停停、转身全丢 | `ros2 topic pub` 是 CLI，每次启动 1~2 s，两次调用之间的空档超过 watchdog 的 0.5 s 超时 | 改用**单进程 Python 节点**连续 publish（`tools/drive_square.py`） |
+
+### 传感器与建图
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 建出来的墙被抹成放射状条纹，内部障碍物完全不见 | 激光装在车头前方 **0.10 m**，而建图/扫描匹配把 `base_link` 位姿当成了激光原点。偏差方向随车头朝向旋转，转几次弯墙就糊了 | 加激光安装外参：`ScanMatcher::setLaserOffset()` + `laserPose()`，建图和打分都先变换到 `laser_link`。参数 `laser_x/y/yaw`（实测 0.10 / 0 / 0） |
+| 地图突然被扯成菱形 | 一条得分只有 **0.637** 的误判回环被接受，优化器为满足这条错边把整张图拉歪 | `loop_confirm_score` 默认 **0.75**。实测真回环 0.81~0.99，误判 0.64 上下 |
+| 真回环被拒绝 | 漂移 **1.45 m**，超过 `loop_max_correction` 默认的 1.0 m | 漂移大时显式调大：`-p loop_max_correction:=2.0` |
+
+### 工具与观测
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 看 `ros2 topic echo` 的 ranges，以为出现了负距离 | YAML 列表项前缀是 `- `，去掉空格后变成负号 | 按 YAML 解析，别用 `tr -d ' '` |
+| 用 matplotlib 画 PGM，障碍物位置上下镜像 | PGM 第 0 行是**图像顶部**（ROS 标准），`imshow(origin='lower')` 会翻转 | 画之前 `arr[::-1]` |
+| `ros2 node list` 显示 `/cmd_vel_adapter × 3`、`/lifecycle_manager_collision × 3` | `ros2 launch` 按 Ctrl+C 时子进程没杀干净，多次启动后堆积 | `./tools/cleanup.sh`，**每次跑之前先执行** |
+| `ros2 param get` 偶尔返回空 | CLI 超时或 daemon 缓存 | 改用 `ros2 param dump /node` 一次取全部 |
+| `pkill -9 -x robot_state_publisher` 从来没生效 | Linux `comm` 最多 15 字符，超长匹配不上 | 改用 `pkill -f "[r]obot_state_publisher"` |
+
+### 时间与 TF
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 回放 bag 时 slam_toolbox 刷 `Lookup would require extrapolation into the past` | bag 里的时间戳是录制时的，回放时节点用**墙钟现在**查 TF | `ros2 bag play --clock 200` + 节点 `use_sim_time:=true` |
+| EKF 配 30 Hz 只跑 9.5 Hz | Gazebo 的 `publish_rate` 默认 10 Hz，把 `/clock` 节流到 10 Hz，全系统定时器都被压住 | 改 100 Hz |
+
 ## 基础示例（35 个 demo）
 
 `src/my_first_pkg/` 是 ROS 2 机制的练手集合：Topic/Service/Action、QoS、自定义接口、Lifecycle、Executor 与回调组、loaned message、TF2、URDF/RViz2、launch。它们用于验证机制、不是主项目，目录说明见 [`docs/features/01-ros2-core.md`](docs/features/01-ros2-core.md)。
