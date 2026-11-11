@@ -49,6 +49,11 @@ def main():
     ap.add_argument('--topic', default='/cmd_vel', help='速度话题')
     ap.add_argument('--settle', type=float, default=1.5,
                     help='开始前等待发现的时间（秒）')
+    ap.add_argument('--open-loop', action='store_true',
+                    help='按时间开环发指令（默认是闭环：看 /odom 够了就停）。'
+                         '开环在 collision_monitor 减速时会转不够角度。')
+    ap.add_argument('--timeout-scale', type=float, default=3.0,
+                    help='闭环时允许超时倍数（默认 3 倍理论时间）')
     args = ap.parse_args()
 
     # 参数解析放在导入 rclpy 之前 —— 这样没 source ROS 时
@@ -56,6 +61,7 @@ def main():
     try:
         import rclpy
         from geometry_msgs.msg import Twist
+        from nav_msgs.msg import Odometry
     except ModuleNotFoundError:
         sys.exit(
             '找不到 rclpy。请先 source ROS 2 环境：\n'
@@ -74,8 +80,39 @@ def main():
     turn_rad = math.radians(args.turn_deg)
     t_turn = abs(turn_rad) / args.yaw_rate
 
-    def hold(vx, wz, dur):
-        """持续发布同一速度指令 dur 秒，然后停稳。"""
+    # ---- 闭环用：订阅 /odom 记住当前位姿 ----
+    state = {'x': 0.0, 'y': 0.0, 'yaw': 0.0, 'ok': False}
+
+    def on_odom(msg):
+        q = msg.pose.pose.orientation
+        s2 = 2.0 * (q.w * q.z + q.x * q.y)
+        c2 = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        state['yaw'] = math.atan2(s2, c2)
+        state['x'] = msg.pose.pose.position.x
+        state['y'] = msg.pose.pose.position.y
+        state['ok'] = True
+
+    sub = node.create_subscription(Odometry, '/odom', on_odom, 20)
+
+    def norm(a):
+        while a > math.pi:
+            a -= 2.0 * math.pi
+        while a < -math.pi:
+            a += 2.0 * math.pi
+        return a
+
+    def pump(sec):
+        t0 = time.time()
+        while time.time() - t0 < sec:
+            rclpy.spin_once(node, timeout_sec=0.02)
+
+    def stop_burst():
+        st = Twist()
+        for _ in range(6):
+            pub.publish(st)
+            time.sleep(0.05)
+
+    def hold_open(vx, wz, dur):
         t0 = time.time()
         m = Twist()
         m.linear.x = vx
@@ -83,28 +120,65 @@ def main():
         while time.time() - t0 < dur:
             pub.publish(m)
             time.sleep(0.05)
-        stop = Twist()
-        for _ in range(6):
-            pub.publish(stop)
+        stop_burst()
+
+    def hold_closed(dist, turn, vx, wz, timeout):
+        """闭环：走够 dist 米 / 转够 turn 弧度就停（看 /odom）。"""
+        pump(0.3)
+        x0, y0, yaw0 = state['x'], state['y'], state['yaw']
+        m = Twist()
+        if abs(dist) > 1e-6:
+            m.linear.x = vx
+        if abs(turn) > 1e-6:
+            m.angular.z = wz
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if dist != 0.0:
+                done = math.hypot(state['x'] - x0, state['y'] - y0) >= abs(dist)
+            else:
+                done = abs(norm(state['yaw'] - yaw0)) >= abs(turn)
+            if done:
+                break
+            pub.publish(m)
+            rclpy.spin_once(node, timeout_sec=0.0)
             time.sleep(0.05)
+        stop_burst()
+        if time.time() - t0 >= timeout:
+            node.get_logger().warn(
+                '闭环超时（%.1f s）：dist=%.2f turn=%.2f，可能是被 collision_monitor 挡住了'
+                % (timeout, dist, turn))
 
     total = args.laps * (sum(legs) / args.speed + len(legs) * t_turn)
     node.get_logger().info(
         '路径：%s 段 %s，每段后转 %.0f°，速度 %.2f m/s，%d 圈，预计 %.1f 秒'
         % (len(legs), legs, args.turn_deg, args.speed, args.laps, total))
 
+    closed = not args.open_loop
+    mode = '闭环（看 /odom）' if closed else '开环（按时间）'
+    node.get_logger().info('驱动模式：%s' % mode)
+
     for lap in range(args.laps):
         for i, L in enumerate(legs):
-            node.get_logger().info(
-                '%d-%d 前进 %.2f m' % (lap + 1, i + 1, L))
-            hold(args.speed, 0.0, L / args.speed)
+            node.get_logger().info('%d-%d 前进 %.2f m' % (lap + 1, i + 1, L))
+            if closed:
+                hold_closed(L, 0.0, args.speed, 0.0,
+                            L / args.speed * args.timeout_scale + 10.0)
+            else:
+                hold_open(args.speed, 0.0, L / args.speed)
             node.get_logger().info(
                 '%d-%d 转 %.0f°' % (lap + 1, i + 1, args.turn_deg))
-            hold(0.0, args.turn_dir * args.yaw_rate * (1 if args.turn_deg >= 0 else -1),
-                 t_turn)
+            wz = args.turn_dir * args.yaw_rate * (1 if args.turn_deg >= 0 else -1)
+            if closed:
+                hold_closed(0.0, turn_rad, 0.0, wz,
+                            t_turn * args.timeout_scale + 10.0)
+            else:
+                hold_open(0.0, wz, t_turn)
 
     node.get_logger().info('回到起点，结束')
-    hold(0.0, 0.0, 1.0)
+    if args.open_loop:
+        hold_open(0.0, 0.0, 1.0)
+    else:
+        pump(1.0)
     node.destroy_node()
     rclpy.shutdown()
 
