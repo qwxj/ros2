@@ -35,5 +35,7 @@ slam_mini:
     keyframe_angle: 0.15       # 或每转过多少弧度（原地转时靠它）
     loop_radius: 2.0           # 回环搜索半径（米）
     loop_min_gap: 10           # 至少隔多少帧才算回环候选
-    loop_confirm_score: 0.60   # 回环确认的匹配得分阈值（最关键）
+    loop_confirm_score: 0.75   # 回环确认的匹配得分阈值（最关键）
+                             # 实测真回环 0.81~0.99，误判 ~0.64；门槛低于 0.7 会
+                             # 放过误判，优化器会把整张图扯歪
     optimize_iterations: 50    # 每次优化的松弛轮数

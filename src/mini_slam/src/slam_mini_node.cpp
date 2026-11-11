@@ -58,7 +58,10 @@ public:
     keyframe_angle_ = declare_parameter<double>("keyframe_angle", 0.15);
     loop_radius_ = declare_parameter<double>("loop_radius", 2.0);
     loop_min_gap_ = declare_parameter<int>("loop_min_gap", 10);
-    loop_confirm_score_ = declare_parameter<double>("loop_confirm_score", 0.60);
+    // 0.75：实测正常回环得分 0.81~0.99，而误判只有 0.6 上下。
+    // 门槛设太低（比如 0.5）会把噪声匹配当成回环，
+    // 优化器为满足这条错边会把整张图扯成菱形。
+    loop_confirm_score_ = declare_parameter<double>("loop_confirm_score", 0.75);
     optimize_iterations_ = declare_parameter<int>("optimize_iterations", 50);
 
     // ---------- 回环的位姿一致性检查 ----------
@@ -588,7 +591,7 @@ private:
   double keyframe_angle_{0.15};
   double loop_radius_{2.0};
   int loop_min_gap_{10};
-  double loop_confirm_score_{0.60};
+  double loop_confirm_score_{0.75};
   int optimize_iterations_{50};
   double loop_max_correction_{1.0};
   double loop_min_correction_{0.05};
