@@ -14,6 +14,17 @@
 | 安全 | watchdog → collision_monitor → 底盘适配器 | 0.5 s 无指令急停；0.7 m 减速 40%、0.28 m 急停；雷达断流 2 s 停车 |
 | 通信 | rclcpp + Fast DDS | QoS 按数据类型选型；loaned message 零拷贝；回调组隔离耗时任务 |
 
+## 仿真效果
+
+![Gazebo 差速机器人仿真](docs/images/gazebo_sim.png)
+
+差速底盘在 Gazebo 场地中运动：蓝色扇形是 2D 激光雷达的射线，红色圆柱与绿色方块是障碍物。
+底部状态栏显示 **实时因子 0.99、渲染 61.6 FPS** —— 物理步长与渲染都没有掉速。
+
+> 这是早期的**线路 B**（Gazebo 插件）。主线**线路 A** 已改为自写 `ros2_control`
+> 硬件接口 + ray-cast 激光模拟，不依赖 Gazebo、启动约 3 秒。两条线路配置不通用，
+> 见下文「两条技术线路」。
+
 ## 架构
 
 ```
