@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<robot name="sine_test">
+
+  <link name="base_link">
+    <visual>
+      <geometry><box size="0.1 0.1 0.1"/></geometry>
+    </visual>
+  </link>
+
+  <link name="link1">
+    <visual>
+      <origin xyz="0.25 0 0"/>
+      <geometry><box size="0.5 0.05 0.05"/></geometry>
+    </visual>
+  </link>
+
+  <joint name="j1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14" upper="3.14" effort="10.0" velocity="2.0"/>
+  </joint>
+
+  <!-- ★ ros2_control 段：声明"这台机器有哪些关节、要哪些接口、用哪个插件" -->
+  <ros2_control name="SineSystem" type="system">
+    <hardware>
+      <!-- 必须等于 my_hardware_plugin.xml 里的 <class name="..."> -->
+      <plugin>my_hardware/SineJoint</plugin>
+      <param name="amplitude">1.0</param>
+      <param name="frequency">0.5</param>
+    </hardware>
+
+    <joint name="j1">
+      <!-- 命令接口：控制器往这里写目标值 -> 代码里的 &cmd_pos_ -->
+      <command_interface name="position"/>
+      <!-- 状态接口：代码把真实值写进 &pos_ -> 系统从这里读 -->
+      <state_interface name="position"/>
+    </joint>
+  </ros2_control>
+
+</robot>

@@ -142,7 +142,8 @@ src/
 ├── my_first_pkg/          # 基础示例（Topic/Service/Action/QoS/Executor/TF2 等 35 个 demo）
 ├── robot_math/            # 纯 C++ 运动学库（不依赖 rclcpp，可被 gtest 直接测）
 ├── robot_math_demo/       # 消费 robot_math 的 find_package 导出链路示例
-└── qos_lab/               # QoS 兼容性矩阵与 lifespan 实验
+├── qos_lab/               # QoS 兼容性矩阵与 lifespan 实验
+└── my_hardware/           # 最小 ros2_control 硬件插件 + 生命周期观测（正弦关节）
 docs/features/             # 各模块设计与实验记录（11 篇）
 docs/learning/             # L0 工程层 / L1 通信层学习笔记
 docs/notes/                # ros2_control / TF2 / 行为树 / 安全与通信速查
@@ -173,6 +174,117 @@ tools/                     # bag 指标、指令时间线等分析脚本
 - **安全链**：watchdog 管"没指令"，collision_monitor 管"会撞"，串联顺序不可颠倒。见 `docs/features/07-safety.md`。
 - **零拷贝**：`borrow_loaned_message` + Fast DDS `data_sharing` profile，对比普通发布的端到端延迟。
 
+## ros2_control 硬件插件：回调是谁调的、什么时候调的
+
+`src/my_hardware/` 是一个最小可运行的 `SystemInterface` 插件（正弦关节），只做一件事：
+把 ros2_control 的**生命周期顺序**和**接口机制**单独拆出来验证，不掺杂底盘、导航、传感器逻辑。
+
+### 六个文件的分工
+
+| 文件 | 回答什么问题 |
+|---|---|
+| `my_hardware_plugin.xml` | **有哪些硬件插件可用**（pluginlib 索引） |
+| `urdf/test.urdf` | **这台机器用哪个插件、有哪些关节、要哪些接口** |
+| `src/sine_joint.cpp` | **插件怎么读写硬件** |
+| `config/controllers.yaml` | **有哪些控制器、每个控制器管哪些关节** |
+| `launch/test.launch.py` | **怎么把它们拉起来** |
+| `CMakeLists.txt` | 编译 `.so` + 安装 + 注册插件描述 |
+
+### ⚠️ 五处字符串必须对上
+
+整个系统靠**字符串匹配**把模块粘起来。任何一处拼错，都会静默失败或报"找不到"。
+
+| # | 位置 A | 位置 B | 拼错的后果 |
+|---|---|---|---|
+| 1 | `plugin.xml` 的 `<class name="my_hardware/SineJoint">` | URDF 的 `<plugin>my_hardware/SineJoint</plugin>` | `Failed to load hardware` |
+| 2 | `plugin.xml` 的 `type="my_hardware::SineJoint"` | C++ 的 `namespace my_hardware { class SineJoint ... }` | 编译能过，运行时 pluginlib 找不到类 |
+| 3 | `plugin.xml` 的 `<library path="my_hardware">` | CMake 的 `add_library(my_hardware ...)` | 找不到 `libmy_hardware.so` |
+| 4 | URDF 的 `<joint name="j1">` | `controllers.yaml` 的 `joints: [j1]` | 控制器报 `joint not found` |
+| 5 | URDF 的 `<state_interface name="position"/>` | 代码的 `HW_IF_POSITION`（值就是 `"position"`） | 接口显示 `[unavailable]` |
+
+### 实测的启动顺序
+
+在 `on_init` / `on_configure` / `on_activate` / `export_*` 里各打一条日志，启动时得到：
+
+```
+[LIFECYCLE] on_init        开始解析 URDF
+[EXPORT] state   : j1/position -> &pos_
+[EXPORT] command : j1/position -> &cmd_pos_
+[LIFECYCLE] on_configure   previous_state=unconfigured
+[LIFECYCLE] on_activate    previous_state=inactive
+```
+
+**两个值得记住的点：**
+
+1. **四个回调在 1 毫秒内跑完**（时间戳 `.9871` → `.9875`），启动开销可忽略。
+2. **`export_state_interfaces` / `export_command_interfaces` 卡在 `on_init` 和 `on_configure` 之间** ——
+   不是"启动时随便什么时候"，而是明确排在这两个回调中间。
+   这解释了为什么 `on_init` 里必须先把 `info_.joints` 准备好（所以必须先调基类 `on_init`）。
+
+### 周期回调：read 在 write 之前
+
+每 100 次打一条日志（100 Hz 下约 1 秒一条）：
+
+```
+[PERIOD] read  #1    pos=0.0000  cmd=0.0000
+[PERIOD] write #1    cmd=0.0000 -> pos=0.0000
+[PERIOD] read  #101  pos=0.0000  cmd=0.0000       ← 1 秒后
+[PERIOD] write #101  cmd=0.0000 -> pos=0.0000
+```
+
+顺序印证了 `read() → controller update() → write()`；每 100 次间隔 1 秒 → `update_rate: 100` 生效。
+
+### 命令生效验证
+
+```bash
+ros2 topic pub --once /forward_position_controller/commands \
+  std_msgs/msg/Float64MultiArray "{data: [1.57]}"
+```
+
+```
+[PERIOD] read  #1901  pos=1.5700  cmd=1.5700
+[PERIOD] write #1901  cmd=1.5700 -> pos=1.5700
+
+$ ros2 topic echo /joint_states --field position
+array('d', [1.57])          ← 不再摆动，固定在 1.57
+```
+
+### ⚠️ 坑：退出时不会走 lifecycle
+
+| 信号 | 进程反应 | 触发 `on_deactivate` / `on_cleanup` |
+|---|---|---|
+| `SIGINT`（Ctrl+C） | **进程不退出**（被忽略），等 7 秒仍活着，最后只能 `kill -9` | ❌ |
+| `SIGTERM` | 进程退出 | ❌ **仍然不触发** |
+
+**结论：`ros2_control_node` 正常退出时不把硬件降级。** 三个推论：
+
+1. `on_deactivate` 里写的"关电机 / 保存状态 / 释放设备"在用户按 Ctrl+C 时**不会执行**
+   → **真机上必须靠硬件看门狗**（失联自动停），不能依赖软件回调。
+2. Humble 没有 CLI 能手动触发硬件组件状态切换（`set_hardware_component_state` 是 Iron+ 才有），
+   所以在 Humble 上**观察不到** `on_deactivate` / `on_cleanup` 的日志。
+3. 这解释了下面「踩过的坑」里那条"`ros2 launch` 按 Ctrl+C 后子进程残留" ——
+   **根因就是 `ros2_control_node` 忽略 SIGINT**，所以只能 `pkill -9`。
+
+### 怎么复现
+
+```bash
+# 终端 1
+ros2 launch my_hardware test.launch.py        # 看前 5 行生命周期日志
+
+# 终端 2
+ros2 run controller_manager spawner forward_position_controller
+ros2 topic pub --once /forward_position_controller/commands \
+  std_msgs/msg/Float64MultiArray "{data: [1.57]}"
+ros2 topic echo /joint_states --field position
+
+# 终端 3
+ros2 control list_hardware_interfaces          # command 有 [claimed]，state 只有名字
+ros2 control list_controllers
+
+# 收尾（Ctrl+C 杀不掉，必须 pkill）
+pkill -9 -f "ros2_control_node"
+pkill -9 -f "robot_state_publisher"
+```
 ## 踩过的坑
 
 调试过程中真实遇到、定位过、修掉的问题。每条都写了「现象 → 根因 → 修法」，

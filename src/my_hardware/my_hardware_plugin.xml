@@ -1,0 +1,7 @@
+<library path="my_hardware">
+  <class name="my_hardware/SineJoint"
+         type="my_hardware::SineJoint"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>正弦关节测试硬件接口（只读，用于验证 ros2_control 数据流）</description>
+  </class>
+</library>
