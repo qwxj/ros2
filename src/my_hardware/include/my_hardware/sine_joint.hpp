@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <vector>
+#include <algorithm>
 
 #include "hardware_interface/system_interface.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -58,6 +59,11 @@ private:
   double cmd_pos_{0.0};    ///< 命令：控制器写入的目标位置（由 export_command_interfaces 交出地址）
   double amp_{1.0};
   double freq_hz_{0.5};
+
+  double target_{0.0};     ///< 目标位置：write() 存入，read() 跟随
+  double tau_{0.15};       ///< 一阶惯性时间常数 [s]
+  double max_pos_{3.14};   ///< 位置限位 [rad]
+  double max_vel_{100.0};  ///< 速度限位 [rad/s]
 
   std::chrono::steady_clock::time_point t0_;
   bool started_{false};

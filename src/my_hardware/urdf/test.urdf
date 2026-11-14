@@ -29,6 +29,11 @@
       <plugin>my_hardware/SineJoint</plugin>
       <param name="amplitude">1.0</param>
       <param name="frequency">0.5</param>
+      <param name="tau">0.15</param>
+      <!-- 位置限位 [rad]：超过就夹住 -->
+      <param name="max_pos">3.14</param>
+      <!-- 速度限位 [rad/s]：先设为 100 = 不限速，第二阶段再改小 -->
+      <param name="max_vel">100.0</param>
     </hardware>
 
     <joint name="j1">

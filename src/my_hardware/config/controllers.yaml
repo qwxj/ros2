@@ -13,3 +13,7 @@ forward_position_controller:
     joints:
       - j1
     interface_name: position
+
+joint_state_broadcaster:
+  ros__parameters:
+    publish_rate: 20.0

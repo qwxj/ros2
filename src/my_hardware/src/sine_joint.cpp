@@ -43,6 +43,17 @@ CallbackReturn SineJoint::on_init(const hardware_interface::HardwareInfo & info)
     freq_hz_ = std::stod(info_.hardware_parameters.at("frequency"));
   }
 
+  if (info_.hardware_parameters.count("tau")) {
+    tau_ = std::stod(info_.hardware_parameters.at("tau"));
+  }
+  if (info_.hardware_parameters.count("max_pos")) {
+    max_pos_ = std::stod(info_.hardware_parameters.at("max_pos"));
+  }
+  if (info_.hardware_parameters.count("max_vel")) {
+    max_vel_ = std::stod(info_.hardware_parameters.at("max_vel"));
+  }
+
+
   if (info_.joints.empty()) {
     RCLCPP_ERROR(rclcpp::get_logger("SineJoint"), "URDF 里没有声明任何 <joint>");
     return CallbackReturn::ERROR;
@@ -52,6 +63,11 @@ CallbackReturn SineJoint::on_init(const hardware_interface::HardwareInfo & info)
     rclcpp::get_logger("SineJoint"),
     "            joint=%s  amplitude=%.2f  frequency=%.2f Hz",
     info_.joints[0].name.c_str(), amp_, freq_hz_);
+  
+  RCLCPP_INFO(
+    rclcpp::get_logger("SineJoint"),
+    "            tau=%.3f s  max_pos=%.2f rad  max_vel=%.1f rad/s",
+    tau_, max_pos_, max_vel_);
 
   return CallbackReturn::SUCCESS;
 }
@@ -70,6 +86,11 @@ CallbackReturn SineJoint::on_activate(const rclcpp_lifecycle::State & previous_s
   started_ = false;
   read_count_ = 0;
   write_count_ = 0;
+
+  pos_ = 0.0;        // ★ 新增：保证每次激活从 0 开始，实验可重复
+  target_ = 0.0;     // ★ 新增
+
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -144,19 +165,32 @@ SineJoint::export_command_interfaces()
 //   read  : 硬件真实值 -> pos_      （只有 active 状态才会被调用）
 //   write : cmd_pos_   -> 硬件
 // ─────────────────────────────────────────────────────────────
-return_type SineJoint::read(const rclcpp::Time &, const rclcpp::Duration &)
+return_type SineJoint::read(const rclcpp::Time &, const rclcpp::Duration &period)
 {
   ++read_count_;
 
-  // 练习 2：状态直接沿用 write() 写进去的值（理想硬件，无动态特性）
-  // 练习 4 会改成：pos_ 按一阶惯性跟随 cmd_pos_，并加限位
+  const double dt = period.seconds();        // ★ 用真实步长，不写死 0.01
 
-  // 每 100 次打一条（100 Hz 下约 1 秒一条），避免刷屏
+
+  // 一阶惯性：用解析解，dt 变大也不会发散
+  //   pos_{k+1} = target + (pos_k - target) * exp(-dt/tau)
+  const double alpha = 1.0 - std::exp(-dt / std::max(tau_, 1e-6));
+  const double desired = pos_ + (target_ - pos_) * alpha;
+
+  // 速度限位：本周期最多变化 max_vel * dt
+  const double max_step = max_vel_ * dt;
+  const double step = std::clamp(desired - pos_, -max_step, max_step);
+
+  // 位置限位
+  pos_ = std::clamp(pos_ + step, -max_pos_, max_pos_);
+
   if (read_count_ % 100 == 1) {
     RCLCPP_INFO(
       rclcpp::get_logger("SineJoint"),
-      "[PERIOD] read  #%lu  pos=%.4f  cmd=%.4f", read_count_, pos_, cmd_pos_);
+      "[PERIOD] read  #%lu  pos=%.4f  target=%.4f  gap=%.4f",
+      read_count_, pos_, target_, target_ - pos_);
   }
+
   return return_type::OK;
 }
 
@@ -164,14 +198,14 @@ return_type SineJoint::write(const rclcpp::Time &, const rclcpp::Duration &)
 {
   ++write_count_;
 
-  // ⚠️ 理想硬件：命令瞬间等于状态。
-  //    真机这里应该是「限幅 + 通过 CAN/串口下发电机」，绝不修改 pos_。
-  pos_ = cmd_pos_;
+
+  // 目标限幅：超过机械行程就不该下发
+  target_ = std::clamp(cmd_pos_, -max_pos_, max_pos_);
 
   if (write_count_ % 100 == 1) {
     RCLCPP_INFO(
       rclcpp::get_logger("SineJoint"),
-      "[PERIOD] write #%lu  cmd=%.4f -> pos=%.4f", write_count_, cmd_pos_, pos_);
+      "[PERIOD] write #%lu  cmd=%.4f -> target=%.4f", write_count_, cmd_pos_, target_);
   }
   return return_type::OK;
 }
