@@ -1,0 +1,64 @@
+<?xml version="1.0" ?>
+<robot name="diff_bot">
+
+    <!-- 车体 -->
+    <link name="base_link">
+        <visual>
+            <geometry><box size="0.4 0.30 0.10"/></geometry>
+        </visual>
+    </link>
+
+
+    <!-- 左轮 -->
+    <link name="left_wheel_link">
+        <visual>
+            <origin rpy="1.5708 0 0"/>
+            <geometry><cylinder radius="0.05" length="0.02"/></geometry>
+        </visual>
+    </link>
+    <joint name="left_wheel_joint" type="continuous">
+        <parent link="base_link"/>
+        <child link="left_wheel_link"/>
+        <origin xyz="0.0 0.15 -0.03"/>
+        <axis xyz="0 1 0"/>
+    </joint>
+
+    <!-- 右轮 -->
+    <link name="right_wheel_link">
+        <visual>
+            <origin rpy="1.5708 0 0"/>
+            <geometry><cylinder radius="0.05" length="0.2"/></geometry>
+        </visual>
+    </link>
+    <joint name="right_wheel_joint" type="continuous">
+        <parent link="base_link"/>
+        <child link="right_wheel_link"/>
+        <origin xyz="0.0 -0.15 -0.03"/>
+        <axis xyz="0 1 0"/>
+    </joint>
+
+
+    <!-- ros2_control控制段 -->
+    <ros2_control name="DiffBotSystem" type="system">
+        <hardware>
+            <plugin>my_hardware/DiffWheel</plugin>
+            <param name="max_wheel_vel">10.0</param>
+            <param name="tau">0.05</param>
+            <param name="encoder_cpr">4096</param>
+        </hardware>
+
+
+        <joint name="left_wheel_joint">
+            <command_interface name="velocity"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+        </joint>
+
+        <joint name="right_wheel_joint">
+            <command_interface name="velocity"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+        </joint>
+
+    </ros2_control>
+</robot>

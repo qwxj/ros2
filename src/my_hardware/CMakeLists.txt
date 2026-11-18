@@ -19,6 +19,7 @@ find_package(pluginlib REQUIRED)
 # ---------- 插件动态库 ----------
 add_library(my_hardware SHARED
   src/sine_joint.cpp
+  src/diff_wheel.cpp
 )
 target_include_directories(my_hardware PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
