@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""走一个闭合方形，用于触发回环（loop closure）。
+"""走一个闭合方形，用于测试底盘运动与轨迹闭环。
 
 为什么用 Python 而不是 `ros2 topic pub`：
     `ros2 topic pub` 是 CLI 程序，每次启动约 1~2 秒、退出也有开销。
@@ -22,7 +22,8 @@
 
 前置条件：
     1. 底盘已启动：  ros2 launch my_robot_control robot.launch.py
-    2. SLAM 已启动：  ros2 run mini_slam slam_mini_node --ros-args ...
+    2. （可选）建图或定位已启动，用于观察轨迹：
+       ros2 launch slam_toolbox online_async_launch.py
 """
 import argparse
 import math
